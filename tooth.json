@@ -1,0 +1,56 @@
+{
+    "format_version": 3,
+    "format_uuid": "289f771f-2c9a-4d73-9f3f-8492495a924d",
+    "tooth": "github.com/wo55555/OptiPiston",
+    "version": "0.1.0-mc26.20",
+    "info": {
+        "name": "OptiPiston",
+        "description": "Client-side smooth piston animation with configurable duration and singleplayer world speed.",
+        "tags": [
+            "platform:levilamina",
+            "type:mod",
+            "minecraft-bedrock",
+            "piston",
+            "redstone"
+        ],
+        "avatar_url": ""
+    },
+    "variants": [
+        {
+            "label": "client",
+            "platform": "win-x64",
+            "dependencies": {
+                "github.com/LiteLDev/LeviLamina#client": "26.20.*"
+            },
+            "assets": [
+                {
+                    "type": "zip",
+                    "urls": [
+                        "https://{{tooth}}/releases/download/v{{version}}/OptiPiston-client-windows-x64.zip"
+                    ],
+                    "placements": [
+                        {
+                            "type": "dir",
+                            "src": "OptiPiston/",
+                            "dest": "mods/OptiPiston/"
+                        }
+                    ]
+                }
+            ],
+            "preserve_files": [
+                "mods/OptiPiston/config/"
+            ],
+            "remove_files": [],
+            "scripts": {
+                "pre_install": [],
+                "install": [],
+                "post_install": [],
+                "pre_pack": [],
+                "post_pack": [],
+                "pre_uninstall": [],
+                "uninstall": [],
+                "post_uninstall": []
+            }
+        }
+    ]
+}

@@ -1,0 +1,31 @@
+{
+    "optipiston": {
+        "command": {
+            "description": "OptiPiston 活塞动画与世界变速",
+            "on": "开启",
+            "off": "关闭",
+            "piston": {
+                "enabled": "活塞动画：{}",
+                "duration": "活塞动画时长：{}gt",
+                "durationRange": "时长必须在 {} 到 {} gt 之间"
+            },
+            "speed": {
+                "set": "请求的世界速度：{}x",
+                "range": "世界速度必须在 {} 到 {} 之间",
+                "blocked": "未生效：{}"
+            },
+            "status": {
+                "piston": "活塞动画{}，时长 {}gt",
+                "world": "世界速度请求 {}x，实际 {}x（{}）",
+                "active": "已生效"
+            }
+        },
+        "worldSpeed": {
+            "noWorld": "未进入世界",
+            "notLocal": "不是本地世界",
+            "multiplayer": "有其他玩家连接",
+            "externalClock": "其他模组正在驱动时钟",
+            "unavailable": "世界变速钩子不可用"
+        }
+    }
+}

@@ -1,0 +1,31 @@
+{
+    "optipiston": {
+        "command": {
+            "description": "OptiPiston piston animation and world speed",
+            "on": "on",
+            "off": "off",
+            "piston": {
+                "enabled": "Piston animation: {}",
+                "duration": "Piston animation duration: {}gt",
+                "durationRange": "Duration must be between {} and {} ticks"
+            },
+            "speed": {
+                "set": "Requested world speed: {}x",
+                "range": "World speed must be between {} and {}",
+                "blocked": "Not applied: {}"
+            },
+            "status": {
+                "piston": "Piston animation {}, duration {}gt",
+                "world": "World speed requested {}x, applied {}x ({})",
+                "active": "active"
+            }
+        },
+        "worldSpeed": {
+            "noWorld": "not in a world",
+            "notLocal": "not a local world",
+            "multiplayer": "other players are connected",
+            "externalClock": "another mod drives the clock",
+            "unavailable": "world speed hooks are unavailable"
+        }
+    }
+}

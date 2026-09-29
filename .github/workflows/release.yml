@@ -34,6 +34,10 @@ jobs:
 
       - uses: xmake-io/github-action-setup-xmake@v1
 
+      # Precompiled artifacts can link against package versions that are not installed.
+      - run: |
+          xmake global --policies=package.precompiled:n
+
       - uses: actions/cache@v6
         with:
           path: |

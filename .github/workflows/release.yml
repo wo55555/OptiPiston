@@ -3,17 +3,34 @@ on:
     types:
       - published
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: windows-latest
-    strategy:
-      matrix:
-        mc:
-          - "26.20"
+    env:
+      OPTIPISTON_VERSION: ${{ github.event.release.tag_name }}
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ github.event.release.tag_name }}
           fetch-depth: 0
+
+      # The tag's tooth.json pins the LeviLamina line this release builds against.
+      - id: target
+        shell: pwsh
+        run: |
+          $tooth = Get-Content tooth.json -Raw | ConvertFrom-Json
+          $tag = "${{ github.event.release.tag_name }}"
+          if ("v$($tooth.version)" -ne $tag) {
+            throw "tooth.json version $($tooth.version) does not match tag $tag"
+          }
+          $range = $tooth.variants[0].dependencies.'github.com/LiteLDev/LeviLamina#client'
+          if ($range -notmatch '^(\d+\.\d+)\.\*$') {
+            throw "Unexpected LeviLamina range: $range"
+          }
+          "mc=$($Matches[1])" >> $env:GITHUB_OUTPUT
 
       - uses: xmake-io/github-action-setup-xmake@v1
 
@@ -21,11 +38,13 @@ jobs:
         with:
           path: |
             ~/AppData/Local/.xmake
-          key: xmake-${{ matrix.mc }}-${{ hashFiles('xmake.lua') }}
+          key: xmake-${{ steps.target.outputs.mc }}-${{ hashFiles('xmake.lua') }}
           restore-keys: |
-            xmake-${{ matrix.mc }}-
+            xmake-${{ steps.target.outputs.mc }}-
 
+      # 26.10 builds with MSVC (selected in xmake.lua); the others use clang-cl.
       - name: Setup LLVM
+        if: steps.target.outputs.mc != '26.10'
         uses: ZhongRuoyu/setup-llvm@v0
         with:
           llvm-version: 22
@@ -34,7 +53,7 @@ jobs:
           xmake repo -u
 
       - run: |
-          xmake f -a x64 -m release -p windows --target_type=client --mc=${{ matrix.mc }} -y
+          xmake f -a x64 -m release -p windows --target_type=client --mc=${{ steps.target.outputs.mc }} -y
 
       - run: |
           xmake -w -y
@@ -45,7 +64,7 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          name: OptiPiston-${{ github.sha }}-mc${{ matrix.mc }}-client-windows-x64
+          name: ${{ github.event.repository.name }}-${{ github.sha }}-client-windows-x64
           path: |
             bin/
 
@@ -55,6 +74,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name }}
 
       - id: extract-release-notes
         uses: ffurrer2/extract-release-notes@v3
@@ -70,27 +91,25 @@ jobs:
       - update-release-notes
     permissions:
       contents: write
-    strategy:
-      matrix:
-        mc:
-          - "26.20"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name }}
 
       - uses: actions/download-artifact@v8
         with:
-          name: OptiPiston-${{ github.sha }}-mc${{ matrix.mc }}-client-windows-x64
+          name: ${{ github.event.repository.name }}-${{ github.sha }}-client-windows-x64
           path: artifact
 
       - run: |
-          cp CHANGELOG.md artifact/
+          cp CHANGELOG.md LICENSE README.md README_ZH.md artifact/
 
       - run: |
-          zip -r ../OptiPiston-client-windows-x64.zip *
+          zip -r ../${{ github.event.repository.name }}-client-windows-x64.zip *
         working-directory: artifact
 
       - uses: softprops/action-gh-release@v3
         with:
           files: |
-            OptiPiston-client-windows-x64.zip
+            ${{ github.event.repository.name }}-client-windows-x64.zip

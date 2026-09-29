@@ -127,13 +127,13 @@ API v1 还可以读写活塞动画开关和时长；设置值会限制在支持�
 
 ## 兼容性
 
-| Minecraft 版本线 | LeviLamina | 发行版                                                                                 | 状态                   |
-| ---------------- | ---------- | -------------------------------------------------------------------------------------- | ---------------------- |
-| 26.10            | `26.10.*`  | [`v0.1.0-mc26.10`](https://github.com/wo55555/OptiPiston/releases/tag/v0.1.0-mc26.10) | 预发布，尚未实机测试   |
-| 26.20            | `26.20.*`  | [`v0.1.0-mc26.20`](https://github.com/wo55555/OptiPiston/releases/tag/v0.1.0-mc26.20) | 预发布，已实机测试     |
-| 26.30            | `26.32.*`  | [`v0.1.0-mc26.30`](https://github.com/wo55555/OptiPiston/releases/tag/v0.1.0-mc26.30) | 预发布，尚未实机测试   |
-| 26.40            | `26.40.*`  | [`v0.1.0-mc26.40`](https://github.com/wo55555/OptiPiston/releases/tag/v0.1.0-mc26.40) | 预发布，尚未实机测试   |
-| 26.50            | `26.51.*`  | [`v0.1.0-mc26.50`](https://github.com/wo55555/OptiPiston/releases/tag/v0.1.0-mc26.50) | 预发布，尚未实机测试   |
+| Minecraft 版本线 | LeviLamina | 发行版                                                                                | 状态                 |
+| ---------------- | ---------- | ------------------------------------------------------------------------------------- | -------------------- |
+| 26.10            | `26.10.*`  | [`v0.1.0-mc26.10`](https://github.com/wo55555/OptiPiston/releases/tag/v0.1.0-mc26.10) | 预发布，尚未实机测试 |
+| 26.20            | `26.20.*`  | [`v0.1.0-mc26.20`](https://github.com/wo55555/OptiPiston/releases/tag/v0.1.0-mc26.20) | 预发布，已实机测试   |
+| 26.30            | `26.32.*`  | [`v0.1.0-mc26.30`](https://github.com/wo55555/OptiPiston/releases/tag/v0.1.0-mc26.30) | 预发布，尚未实机测试 |
+| 26.40            | `26.40.*`  | [`v0.1.0-mc26.40`](https://github.com/wo55555/OptiPiston/releases/tag/v0.1.0-mc26.40) | 预发布，尚未实机测试 |
+| 26.50            | `26.51.*`  | [`v0.1.0-mc26.50`](https://github.com/wo55555/OptiPiston/releases/tag/v0.1.0-mc26.50) | 预发布，尚未实机测试 |
 
 OptiPiston 面向 Windows x64 平台的 Minecraft 基岩版，以纯客户端模组形式发布。每条版本线单独发布，只能在所列 LeviLamina 版本上加载。目前已发布的都是预发布版本。
 

@@ -34,8 +34,9 @@ jobs:
 
       - uses: xmake-io/github-action-setup-xmake@v1
 
-      # Precompiled artifacts can link against package versions that are not installed.
-      - run: |
+      # 26.10's precompiled libcurl links a zlib version that is not installed.
+      - if: steps.target.outputs.mc == '26.10'
+        run: |
           xmake global --policies=package.precompiled:n
 
       - uses: actions/cache@v6

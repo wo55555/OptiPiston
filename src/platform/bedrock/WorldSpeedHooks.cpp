@@ -301,7 +301,7 @@ PlayerCounts countPlayers(::Level& level) {
     PlayerCounts counts{0, 0, level.getNumRemotePlayers(), level.getActivePlayerCount()};
     level.forEachPlayer([&counts](::Player const& player) {
         ++counts.players;
-        if (!player.isHostingPlayer() && !player.isSimulatedPlayer()) ++counts.guests;
+        if (!player.mIsHostingPlayer && !player.isSimulatedPlayer()) ++counts.guests;
         return true;
     });
     return counts;

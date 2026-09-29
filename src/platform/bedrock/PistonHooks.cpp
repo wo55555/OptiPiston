@@ -29,7 +29,9 @@
 #include "mc/network/packet/UpdateSubChunkBlocksChangedInfo.h"
 #include "mc/network/packet/UpdateSubChunkBlocksPacket.h"
 #include "mc/network/packet/UpdateSubChunkNetworkBlockInfo.h"
+#if OPTIPISTON_MC < 2651
 #include "mc/platform/threading/Mutex.h"
+#endif
 #include "mc/world/actor/ActorTerrainInterlockData.h"
 #include "mc/world/level/BlockPalette.h"
 #include "mc/world/level/BlockPos.h"
@@ -46,6 +48,23 @@
 #include "mc/world/level/chunk/LevelChunk.h"
 #include "mc/world/level/chunk/LevelChunkBlockActorStorage.h"
 #include "mc/world/phys/AABB.h"
+
+#if OPTIPISTON_MC == 2610
+#include "mc/client/renderer/blockactor/BlockActorRenderDispatcher.h"
+#include "mc/client/renderer/chunks/RenderChunkBuilder.h"
+#include "mc/deps/minecraft_renderer/framebuilder/dragon/RenderMetadata.h"
+#include "mc/deps/minecraft_renderer/renderer/MaterialPtr.h"
+#include "mc/deps/minecraft_renderer/resources/ClientTexture.h"
+#include "mc/world/level/block/PistonBlock.h"
+#include "mc/world/level/block/VanillaStates.h"
+#endif
+#if OPTIPISTON_MC != 2620
+#include "mc/world/level/BlockSourceListener.h"
+#endif
+#if OPTIPISTON_MC >= 2632
+#include "mc/world/level/block/actor/VanillaBlockActor.h"
+#include "mc/world/level/block/actor/component/IVanillaRenderBlockActorComponent.h"
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -76,6 +95,78 @@ struct BlockPosHash {
              ^ (static_cast<size_t>(static_cast<uint32_t>(pos.z)) * 83492791u);
     }
 };
+
+// ---- Version adapters: the only places that know which Minecraft API this build targets ----
+
+::ActorTerrainInterlockData& interlockOf(::BlockActor& actor) {
+#if OPTIPISTON_MC >= 2632
+    // Only called for pistons and moving blocks, both vanilla block actors.
+    return static_cast<::VanillaBlockActor&>(actor).mTerrainInterlockData.get();
+#else
+    return actor.mTerrainInterlockData.get();
+#endif
+}
+
+std::string wrappedName(::MovingBlockActor const& moving) {
+#if OPTIPISTON_MC == 2620
+    return moving.getWrappedBlock().getTypeName();
+#else
+    ::Block const* block = moving.mWrappedBlock;
+    return block ? std::string{block->getTypeName()} : std::string{"minecraft:air"};
+#endif
+}
+
+bool wrappedAir(::MovingBlockActor const& moving) {
+#if OPTIPISTON_MC == 2620
+    return moving.getWrappedBlock().isAir();
+#else
+    ::Block const* block = moving.mWrappedBlock;
+    return !block || block->isAir();
+#endif
+}
+
+::PistonBlockActor* owningPiston(::MovingBlockActor& moving, ::BlockSource& region) {
+#if OPTIPISTON_MC == 2620
+    return moving.getOwningPiston(region);
+#else
+    auto* actor = region.getBlockEntity(moving.mPistonBlockPos.get());
+    return actor && actor->mType == ::BlockActorType::PistonArm ? static_cast<::PistonBlockActor*>(actor) : nullptr;
+#endif
+}
+
+::BlockPos facingOf(::PistonBlockActor const& piston, ::BlockSource& region) {
+#if OPTIPISTON_MC == 2610
+    auto const facing = region.getBlock(piston.mPosition.get()).getState<int>(::VanillaStates::FacingDirection());
+    if (!facing || *facing < 0 || *facing > 5) return {0, 0, 0};
+    return ::PistonBlock::ARM_DIRECTION_OFFSETS()[*facing];
+#else
+    return piston.getFacingDir(region);
+#endif
+}
+
+void fireAreaChanged(::BlockSource& region, ::BlockPos const& min, ::BlockPos const& max) {
+#if OPTIPISTON_MC == 2620
+    region.fireAreaChanged(min, max);
+#else
+    // Copied: a listener may unregister itself while being notified.
+    auto const listeners = region.mListeners.get();
+    for (auto* listener : listeners) listener->onAreaChanged(region, min, max);
+#endif
+}
+
+#if OPTIPISTON_MC >= 2632
+using QueuedItem = ::IVanillaRenderBlockActorComponent;
+QueuedItem* queuedItemOf(::BlockActor* actor) { return actor->_getRenderComponent(); }
+auto&       opaqueQueueOf(::LevelRendererCamera& camera) { return camera.mRenderComponentRenderQueue.get(); }
+auto&       alphaQueueOf(::LevelRendererCamera& camera) { return camera.mRenderComponentRenderAlphaQueue.get(); }
+auto&       shadowQueueOf(::LevelRendererCamera& camera) { return camera.mRenderComponentShadowQueue.get(); }
+#else
+using QueuedItem = ::BlockActor;
+QueuedItem* queuedItemOf(::BlockActor* actor) { return actor; }
+auto&       opaqueQueueOf(::LevelRendererCamera& camera) { return camera.mBlockActorRenderQueue.get(); }
+auto&       alphaQueueOf(::LevelRendererCamera& camera) { return camera.mBlockActorRenderAlphaQueue.get(); }
+auto&       shadowQueueOf(::LevelRendererCamera& camera) { return camera.mBlockActorShadowQueue.get(); }
+#endif
 
 // Tick at which a MovingBlock was seen detached from its cell; the interlock struct has no field to reuse for this.
 std::unordered_map<::MovingBlockActor const*, uint64_t> gTailAnchors;
@@ -296,7 +387,7 @@ thread_local bool tImmediateRebuild = false;
 void rebuildCells(::BlockSource& region, std::vector<::BlockPos> const& cells) {
     tImmediateRebuild = true;
     // Neighbours kept faces against the hidden block and may sit in another subchunk.
-    for (auto const& pos : cells) region.fireAreaChanged(pos - ::BlockPos{1, 1, 1}, pos + ::BlockPos{1, 1, 1});
+    for (auto const& pos : cells) fireAreaChanged(region, pos - ::BlockPos{1, 1, 1}, pos + ::BlockPos{1, 1, 1});
     tImmediateRebuild = false;
 }
 
@@ -546,7 +637,7 @@ void registerMoving(::MovingBlockActor const& moving, ::BlockSource& region) {
     // An older claim still hiding its landed block keeps the cell until it is re-meshed.
     if (claim != gCellClaims.end() && claim->second.landed && !claim->second.released) return;
     if (claim != gCellClaims.end() && claim->second.action == action) return;
-    gCellClaims[cell] = {action, moving.getWrappedBlock().getTypeName()};
+    gCellClaims[cell] = {action, wrappedName(moving)};
     updateMeshWatchLocked();
 }
 
@@ -666,14 +757,16 @@ void queueFreshMoving(::LevelRendererCamera& camera) {
             for (auto const& dir : dirs)
                 if (seen.insert(pos + dir).second) cells.push_back(pos + dir);
     }
-    auto& queue = camera.mBlockActorRenderQueue.get();
-    auto& alpha = camera.mBlockActorRenderAlphaQueue.get();
+    auto& queue = opaqueQueueOf(camera);
+    auto& alpha = alphaQueueOf(camera);
     for (auto const& pos : cells) {
         auto* actor = region.getBlockEntity(pos);
         if (!actor || actor->mType != ::BlockActorType::MovingBlock) continue;
-        auto const same = [actor](auto const& item) { return item.get() == actor; };
+        auto* const item = queuedItemOf(actor);
+        if (!item) continue;
+        auto const same = [item](auto const& queued) { return queued.get() == item; };
         if (std::any_of(queue.begin(), queue.end(), same) || std::any_of(alpha.begin(), alpha.end(), same)) continue;
-        queue.emplace_back(actor);
+        queue.emplace_back(item);
     }
 }
 
@@ -683,11 +776,11 @@ void requeueHeldMoving(::LevelRendererCamera& camera) {
     std::vector<std::shared_ptr<::BlockActor>> drop;
     {
         std::lock_guard const guard(gAnimMutex);
-        auto&                 queue  = camera.mBlockActorRenderQueue.get();
-        auto&                 alpha  = camera.mBlockActorRenderAlphaQueue.get();
-        auto&                 shadow = camera.mBlockActorShadowQueue.get();
-        auto const            queued = [](auto const& list, ::BlockActor const* actor) {
-            return std::any_of(list.begin(), list.end(), [actor](auto const& item) { return item.get() == actor; });
+        auto&                 queue  = opaqueQueueOf(camera);
+        auto&                 alpha  = alphaQueueOf(camera);
+        auto&                 shadow = shadowQueueOf(camera);
+        auto const            queued = [](auto const& list, QueuedItem const* item) {
+            return std::any_of(list.begin(), list.end(), [item](auto const& other) { return other.get() == item; });
         };
         for (auto& [moving, entry] : gMovingAction) {
             auto* actor = static_cast<::BlockActor*>(const_cast<::MovingBlockActor*>(moving));
@@ -695,15 +788,16 @@ void requeueHeldMoving(::LevelRendererCamera& camera) {
                 if (entry.keep) drop.push_back(std::move(entry.keep));
                 continue;
             }
-            if (queued(queue, actor) || queued(alpha, actor)) continue;
-            queue.emplace_back(actor);
+            auto* const item = queuedItemOf(actor);
+            if (!item || queued(queue, item) || queued(alpha, item)) continue;
+            queue.emplace_back(item);
         }
         drop.insert(drop.end(), std::make_move_iterator(gDropKeep.begin()), std::make_move_iterator(gDropKeep.end()));
         gDropKeep.clear();
         // Only this reference keeps it alive, so only our requeue put it here.
         for (auto const& ref : drop) {
             if (ref.use_count() != 1) continue;
-            auto const same = [actor = ref.get()](auto const& item) { return item.get() == actor; };
+            auto const same = [item = queuedItemOf(ref.get())](auto const& other) { return other.get() == item; };
             std::erase_if(queue, same);
             std::erase_if(alpha, same);
             std::erase_if(shadow, same);
@@ -724,6 +818,26 @@ bool hasPistonStepped(::BlockActor const* piston) {
     return gSteppedPistons.contains(piston);
 }
 
+// Piston NBT carries no interlock data, so a client-side piston rebuilt from a block-actor packet would stay
+// InitialNotVisible until the engine's timeout and drop the arm for about three ticks.
+#if OPTIPISTON_MC >= 2632
+// PistonBlockActor's own constructor is not exported here; the base that owns the interlock data is.
+LL_TYPE_INSTANCE_HOOK(
+    OptiPistonPistonArmVisibilityHook,
+    ll::memory::HookPriority::Normal,
+    VanillaBlockActor,
+    &VanillaBlockActor::$ctor,
+    void*,
+    ::BlockActorType       type,
+    ::BlockPos const&      pos,
+    ::BlockActorRendererId rendererId
+) {
+    auto* result = origin(type, pos, rendererId);
+    if (type == ::BlockActorType::PistonArm && smoothPistonRenderEnabled())
+        mTerrainInterlockData->mRenderVisibilityState = VisibilityState::Visible;
+    return result;
+}
+#else
 LL_TYPE_INSTANCE_HOOK(
     OptiPistonPistonArmVisibilityHook,
     ll::memory::HookPriority::Normal,
@@ -734,11 +848,10 @@ LL_TYPE_INSTANCE_HOOK(
     bool              isSticky
 ) {
     auto* result = origin(pos, isSticky);
-    // Piston NBT carries no interlock data, so a client-side piston rebuilt from a block-actor packet would
-    // stay InitialNotVisible until the engine's timeout and drop the arm for about three ticks.
     if (smoothPistonRenderEnabled()) mTerrainInterlockData->mRenderVisibilityState = VisibilityState::Visible;
     return result;
 }
+#endif
 
 // The round counter has to advance somewhere that runs once per game tick and independently of the render
 // framerate.
@@ -776,17 +889,46 @@ LL_TYPE_INSTANCE_HOOK(
     gHeadOwnerRound.store(static_cast<uint64_t>(nowTick), std::memory_order_relaxed);
 }
 
-LL_TYPE_INSTANCE_HOOK(
-    OptiPistonPistonArmHook,
-    ll::memory::HookPriority::Normal,
-    PistonBlockActorRenderer,
-    &PistonBlockActorRenderer::$render,
-    void,
+#if OPTIPISTON_MC != 2620
+// getProgress is inlined into the renderer here, so the visual value is lent to the fields it reads.
+class ProgressOverride {
+public:
+    ProgressOverride(::BlockActor& entity, float alpha) {
+        if (entity.mType != ::BlockActorType::PistonArm || !animationActive()) return;
+        auto const visual = visualArmProgress(entity.mPosition.get(), alpha);
+        if (!visual) return;
+        mPiston                = static_cast<::PistonBlockActor*>(&entity);
+        mProgress              = mPiston->mProgress;
+        mLastProgress          = mPiston->mLastProgress;
+        mPiston->mProgress     = *visual;
+        mPiston->mLastProgress = *visual;
+    }
+    ~ProgressOverride() {
+        if (!mPiston) return;
+        mPiston->mProgress     = mProgress;
+        mPiston->mLastProgress = mLastProgress;
+    }
+    ProgressOverride(ProgressOverride const&)            = delete;
+    ProgressOverride& operator=(ProgressOverride const&) = delete;
+
+private:
+    ::PistonBlockActor* mPiston{};
+    float               mProgress{};
+    float               mLastProgress{};
+};
+#endif
+
+// Shared by the renderer hooks and, where those are not exported, the dispatcher hook. position is the draw's
+// own copy; draw() renders with whatever it holds.
+template <class Draw>
+void drawArm(
     ::BaseActorRenderContext& renderContext,
-    ::BlockActorRenderData&   blockEntityRenderData
+    ::BlockSource&            renderSource,
+    ::BlockActor&             entity,
+    ::Vec3&                   position,
+    Draw&&                    draw
 ) {
-    auto& entity    = blockEntityRenderData.entity;
-    auto& interlock = entity.mTerrainInterlockData.get();
+    auto& interlock = interlockOf(entity);
 
     bool const enabled = smoothPistonRenderEnabled();
     bool const hidden  = interlock.mRenderVisibilityState == VisibilityState::InitialNotVisible;
@@ -800,9 +942,7 @@ LL_TYPE_INSTANCE_HOOK(
     // A piston in a moving_block cell is cargo being pushed by another piston rather than the one driving the
     // animation, so it must lose to an actively extending head instead of competing with it.
     bool const isCargo =
-        isArm
-        && (nested
-            || blockEntityRenderData.renderSource.getBlock(entity.mPosition).getTypeName() == "minecraft:moving_block");
+        isArm && (nested || renderSource.getBlock(entity.mPosition).getTypeName() == "minecraft:moving_block");
     // Driving heads outrank cargo, and within either role a piston that advanced mProgress outranks an
     // untouched leftover. Equal rank falls back to first-come so exactly one head survives.
     int const selfRank       = (isCargo ? 0 : 2) + (selfStepped ? 1 : 0);
@@ -829,10 +969,13 @@ LL_TYPE_INSTANCE_HOOK(
     if (skipZombieHead) return;
 
     if (enabled) {
-        gFrameLt.store(blockEntityRenderData.renderSource.getLevel().getCurrentTick().tickID);
+        gFrameLt.store(renderSource.getLevel().getCurrentTick().tickID);
         gFrameDrewActors.store(true, std::memory_order_relaxed);
     }
-    RenderScope const     scope;
+    RenderScope const scope;
+#if OPTIPISTON_MC != 2620
+    ProgressOverride const progress(entity, renderContext.mFrameAlpha);
+#endif
     std::optional<::Vec3> bodyOffset;
     if (isArm && animationActive() && !nested) {
         bodyOffset = visualBodyOffset(entity.mPosition.get(), renderContext.mFrameAlpha);
@@ -840,29 +983,20 @@ LL_TYPE_INSTANCE_HOOK(
         if (!bodyOffset && !isCargo) bodyOffset = landedBodyOffset(entity.mPosition.get(), renderContext.mFrameAlpha);
     }
     if (!bodyOffset || (bodyOffset->x == 0.0f && bodyOffset->y == 0.0f && bodyOffset->z == 0.0f)) {
-        origin(renderContext, blockEntityRenderData);
+        draw();
         return;
     }
-    // The dispatcher owns this position for the current draw only; shift the arm with its still-moving body.
-    auto&      position  = const_cast<::Vec3&>(blockEntityRenderData.renderPosition);
-    auto const saved     = position;
-    position.x          += bodyOffset->x;
-    position.y          += bodyOffset->y;
-    position.z          += bodyOffset->z;
-    origin(renderContext, blockEntityRenderData);
+    // Shift the arm with its still-moving body.
+    auto const saved  = position;
+    position.x       += bodyOffset->x;
+    position.y       += bodyOffset->y;
+    position.z       += bodyOffset->z;
+    draw();
     position = saved;
 }
 
-LL_TYPE_INSTANCE_HOOK(
-    OptiPistonMovingBlockGhostHook,
-    ll::memory::HookPriority::Normal,
-    MovingBlockActorRenderer,
-    &MovingBlockActorRenderer::$render,
-    void,
-    ::BaseActorRenderContext& renderContext,
-    ::BlockActorRenderData&   blockEntityRenderData
-) {
-    auto&      entity    = blockEntityRenderData.entity;
+template <class Draw>
+void drawMoving(::BaseActorRenderContext&, ::BlockSource& source, ::BlockActor& entity, Draw&& draw) {
     bool const isMoving  = entity.mType == ::BlockActorType::MovingBlock;
     auto*      movingPtr = isMoving ? static_cast<::MovingBlockActor*>(&entity) : nullptr;
 
@@ -870,12 +1004,11 @@ LL_TYPE_INSTANCE_HOOK(
     CarrierScope const carrier(&entity);
 
     if (!smoothPistonRenderEnabled() || !isMoving) {
-        origin(renderContext, blockEntityRenderData);
+        draw();
         return;
     }
 
-    auto&      interlock = entity.mTerrainInterlockData.get();
-    auto&      source    = blockEntityRenderData.renderSource;
+    auto&      interlock = interlockOf(entity);
     auto const nowTick   = source.getLevel().getCurrentTick().tickID;
     gFrameLt.store(nowTick);
     gFrameDrewActors.store(true, std::memory_order_relaxed);
@@ -895,7 +1028,7 @@ LL_TYPE_INSTANCE_HOOK(
         if (movingHeld(*movingPtr)) {
             interlock.mRenderVisibilityState = VisibilityState::Visible;
             interlock.mHasBeenDelayedDeleted = false;
-            origin(renderContext, blockEntityRenderData);
+            draw();
             return;
         }
     }
@@ -904,11 +1037,11 @@ LL_TYPE_INSTANCE_HOOK(
 
     // An air-wrapped MovingBlock has no replacement block of its own coming, so hiding it while its cell is
     // still empty would open a hole. Once a real block occupies the cell there is nothing left for it to cover.
-    bool const coversNothing = movingPtr->getWrappedBlock().isAir() && cellBlock.isAir();
+    bool const coversNothing = wrappedAir(*movingPtr) && cellBlock.isAir();
 
     // getDrawPos collapses as soon as mProgress reaches 1, but the renderer keeps lerping mLastProgress towards
     // it for another tick. Both fields at 1 is the only state where no interpolation is left.
-    auto* const owner   = movingPtr->getOwningPiston(source);
+    auto* const owner   = owningPiston(*movingPtr, source);
     bool const  arrived = owner != nullptr && owner->mProgress >= 1.0f && owner->mLastProgress >= 1.0f;
 
     // Detached means the block entity no longer belongs to this cell: the block has been handed to the next
@@ -919,7 +1052,7 @@ LL_TYPE_INSTANCE_HOOK(
     // A piston body never hands its block to a neighbour, so for it detachment only means the cell
     // re-registered a fresh instance. Retiring it left the cell with neither entity nor replacement block for
     // several frames, which is the piston vanishing mid-extension.
-    bool const isPistonBody = movingPtr->getWrappedBlock().getTypeName().find("piston") != std::string::npos;
+    bool const isPistonBody = wrappedName(*movingPtr).find("piston") != std::string::npos;
 
     if (coversNothing || isPistonBody) {
         // Leave it to vanilla: nothing to hold on screen, nothing to hide.
@@ -932,8 +1065,102 @@ LL_TYPE_INSTANCE_HOOK(
         gTailAnchors[movingPtr] = nowTick;
     }
 
-    origin(renderContext, blockEntityRenderData);
+    draw();
 }
+
+#if OPTIPISTON_MC == 2610
+// Neither renderer exports its render here, so both are intercepted where the dispatcher hands them the actor.
+LL_TYPE_INSTANCE_HOOK(
+    OptiPistonBlockActorDispatchHook,
+    ll::memory::HookPriority::Normal,
+    BlockActorRenderDispatcher,
+    static_cast<void (::BlockActorRenderDispatcher::*)(
+        ::BaseActorRenderContext&,
+        ::BlockSource&,
+        ::BlockActor&,
+        ::Block const&,
+        ::Vec3 const&,
+        ::BlockPos const&,
+        bool,
+        ::mce::MaterialPtr const&,
+        ::mce::ClientTexture const*,
+        int,
+        std::optional<::dragon::RenderMetadata>
+    )>(&::BlockActorRenderDispatcher::render),
+    void,
+    ::BaseActorRenderContext&               entityRenderContext,
+    ::BlockSource&                          renderSource,
+    ::BlockActor&                           e,
+    ::Block const&                          block,
+    ::Vec3 const&                           renderPos,
+    ::BlockPos const&                       worldPos,
+    bool                                    renderAlphaLayer,
+    ::mce::MaterialPtr const&               forcedMat,
+    ::mce::ClientTexture const*             forceTex,
+    int                                     breakingAmount,
+    std::optional<::dragon::RenderMetadata> renderMetadata
+) {
+    ::Vec3     position = renderPos;
+    auto const draw     = [&] {
+        origin(
+            entityRenderContext,
+            renderSource,
+            e,
+            block,
+            position,
+            worldPos,
+            renderAlphaLayer,
+            forcedMat,
+            forceTex,
+            breakingAmount,
+            std::move(renderMetadata)
+        );
+    };
+    // The renderer hooks this replaces only ever covered the opaque pass.
+    if (renderAlphaLayer) draw();
+    else if (e.mType == ::BlockActorType::PistonArm) drawArm(entityRenderContext, renderSource, e, position, draw);
+    else if (e.mType == ::BlockActorType::MovingBlock) drawMoving(entityRenderContext, renderSource, e, draw);
+    else draw();
+}
+#else
+::BlockActor& renderedActor(::BlockActorRenderData& data) {
+#if OPTIPISTON_MC >= 2632
+    return data.entity.getBlockActor();
+#else
+    return data.entity;
+#endif
+}
+
+LL_TYPE_INSTANCE_HOOK(
+    OptiPistonPistonArmHook,
+    ll::memory::HookPriority::Normal,
+    PistonBlockActorRenderer,
+    &PistonBlockActorRenderer::$render,
+    void,
+    ::BaseActorRenderContext& renderContext,
+    ::BlockActorRenderData&   blockEntityRenderData
+) {
+    // The dispatcher owns this position for the current draw only.
+    auto& position = const_cast<::Vec3&>(blockEntityRenderData.renderPosition);
+    drawArm(renderContext, blockEntityRenderData.renderSource, renderedActor(blockEntityRenderData), position, [&] {
+        origin(renderContext, blockEntityRenderData);
+    });
+}
+
+LL_TYPE_INSTANCE_HOOK(
+    OptiPistonMovingBlockGhostHook,
+    ll::memory::HookPriority::Normal,
+    MovingBlockActorRenderer,
+    &MovingBlockActorRenderer::$render,
+    void,
+    ::BaseActorRenderContext& renderContext,
+    ::BlockActorRenderData&   blockEntityRenderData
+) {
+    drawMoving(renderContext, blockEntityRenderData.renderSource, renderedActor(blockEntityRenderData), [&] {
+        origin(renderContext, blockEntityRenderData);
+    });
+}
+#endif
 
 // A recycled address must not inherit the previous MovingBlock's tail state.
 LL_TYPE_INSTANCE_HOOK(
@@ -951,11 +1178,17 @@ LL_TYPE_INSTANCE_HOOK(
 }
 
 // A destroyed MovingBlock must leave the tables before its address can be re-queued or reused.
+#if OPTIPISTON_MC >= 2632
+// BlockActor's destructor is not exported on every version here; every MovingBlock passes through this one.
+using DtorOwner = ::VanillaBlockActor;
+#else
+using DtorOwner = ::BlockActor;
+#endif
 LL_TYPE_INSTANCE_HOOK(
     OptiPistonBlockActorDtorHook,
     ll::memory::HookPriority::Normal,
-    BlockActor,
-    &BlockActor::$dtor,
+    DtorOwner,
+    &DtorOwner::$dtor,
     void
 ) {
     if (mType == ::BlockActorType::MovingBlock)
@@ -963,6 +1196,7 @@ LL_TYPE_INSTANCE_HOOK(
     origin();
 }
 
+#if OPTIPISTON_MC == 2620 || OPTIPISTON_MC == 2632
 LL_TYPE_INSTANCE_HOOK(
     OptiPistonStartRebuildHook,
     ll::memory::HookPriority::Normal,
@@ -976,7 +1210,29 @@ LL_TYPE_INSTANCE_HOOK(
     tMeshGeometry = this;
     origin(builder, origin_);
 }
+#endif
 
+#if OPTIPISTON_MC == 2610
+// The geometry's own rebuild entry points are not exported here; the builder pass that fills it is.
+LL_TYPE_INSTANCE_HOOK(
+    OptiPistonRebuildHook,
+    ll::memory::HookPriority::Normal,
+    RenderChunkBuilder,
+    &RenderChunkBuilder::build,
+    void,
+    ::RenderChunkGeometry&                                     geometry,
+    bool                                                       transparentLeaves,
+    ::BakedBlockLightType                                      lightingType,
+    bool                                                       forExport,
+    ::mce::framebuilder::FrameLightingModelCapabilities const& caps
+) {
+    meshBuildStarted(&geometry);
+    auto const saved = tMeshGeometry;
+    tMeshGeometry    = &geometry;
+    origin(geometry, transparentLeaves, lightingType, forExport, caps);
+    tMeshGeometry = saved;
+}
+#else
 LL_TYPE_INSTANCE_HOOK(
     OptiPistonRebuildHook,
     ll::memory::HookPriority::Normal,
@@ -989,12 +1245,36 @@ LL_TYPE_INSTANCE_HOOK(
     bool                                                       lightingModelCapabilities,
     ::mce::framebuilder::FrameLightingModelCapabilities const& caps
 ) {
+#if OPTIPISTON_MC >= 2640
+    // startRebuild is not exported here; this is the first point of a new build.
+    meshBuildStarted(this);
+#endif
     auto const saved = tMeshGeometry;
     tMeshGeometry    = this;
     origin(builder, lightingType, forExport, lightingModelCapabilities, caps);
     tMeshGeometry = saved;
 }
+#endif
 
+#if OPTIPISTON_MC >= 2651
+LL_TYPE_INSTANCE_HOOK(
+    OptiPistonEndRebuildHook,
+    ll::memory::HookPriority::Normal,
+    RenderChunkGeometry,
+    &RenderChunkGeometry::endRebuild,
+    void,
+    ::RenderChunkBuilder&           builder,
+    ::mce::BufferResourceService&   bufferResourceService,
+    bool                            isBuilding,
+    bool                            alreadyHadGeometry,
+    ::dragon::RenderMetadata const& renderMetadata,
+    bool                            useSplitStream
+) {
+    origin(builder, bufferResourceService, isBuilding, alreadyHadGeometry, renderMetadata, useSplitStream);
+    tMeshGeometry = nullptr;
+    meshBuildCommitted(this);
+}
+#else
 LL_TYPE_INSTANCE_HOOK(
     OptiPistonEndRebuildHook,
     ll::memory::HookPriority::Normal,
@@ -1011,8 +1291,10 @@ LL_TYPE_INSTANCE_HOOK(
     tMeshGeometry = nullptr;
     meshBuildCommitted(this);
 }
+#endif
 
 // Passes without block actors (export) do not count, so "next frame" always means a frame that drew them.
+#if OPTIPISTON_MC == 2620
 LL_TYPE_INSTANCE_HOOK(
     OptiPistonFrameHook,
     ll::memory::HookPriority::Normal,
@@ -1024,6 +1306,21 @@ LL_TYPE_INSTANCE_HOOK(
     origin(textureResourceService);
     if (gFrameDrewActors.exchange(false, std::memory_order_relaxed)) gFrame.fetch_add(1, std::memory_order_relaxed);
 }
+#else
+// endFrame is not exported here; renderLevel is the exported per-frame call.
+LL_TYPE_INSTANCE_HOOK(
+    OptiPistonFrameHook,
+    ll::memory::HookPriority::Normal,
+    LevelRenderer,
+    &LevelRenderer::renderLevel,
+    void,
+    ::ScreenContext&           screenContext,
+    ::FrameRenderObject const& renderObj
+) {
+    origin(screenContext, renderObj);
+    if (gFrameDrewActors.exchange(false, std::memory_order_relaxed)) gFrame.fetch_add(1, std::memory_order_relaxed);
+}
+#endif
 
 // A subchunk re-collect drops a detached MovingBlock from the queue; the main camera overrides the base
 // collection.
@@ -1040,7 +1337,8 @@ LL_TYPE_INSTANCE_HOOK(
 }
 
 // The camera dispatches by the cell's block; once the real block lands there, a held MovingBlock gets no
-// renderer.
+// renderer. Later versions no longer have this lookup.
+#if OPTIPISTON_MC <= 2620
 LL_TYPE_INSTANCE_HOOK(
     OptiPistonBlockForEntityHook,
     ll::memory::HookPriority::Normal,
@@ -1061,6 +1359,7 @@ LL_TYPE_INSTANCE_HOOK(
     // Looked up per call: the replay re-registers blocks, which frees any cached Block.
     return &::BlockTypeRegistry::get().getDefaultBlockState(::VanillaBlockTypeIds::MovingBlock());
 }
+#endif
 
 // Nonzero while a BlockActorDataPacket is being handled; the client may re-apply held data later outside it.
 thread_local int  tBlockActorDataDepth   = 0;
@@ -1141,9 +1440,10 @@ LL_TYPE_INSTANCE_HOOK(
     if (mState != ::PistonState::Expanding && mState != ::PistonState::Retracting) return;
     // Late data with no recorded arrival cannot be placed on the timeline; native state already reflects it.
     if (tBlockActorDataDepth == 0 && !heldTick) return;
-    startAction(region, mPosition.get(), getFacingDir(region), mState == ::PistonState::Expanding, heldTick);
+    startAction(region, mPosition.get(), facingOf(*this, region), mState == ::PistonState::Expanding, heldTick);
 }
 
+#if OPTIPISTON_MC == 2620
 LL_TYPE_INSTANCE_HOOK(
     OptiPistonPistonProgressHook,
     ll::memory::HookPriority::Normal,
@@ -1157,6 +1457,7 @@ LL_TYPE_INSTANCE_HOOK(
     }
     return origin(a);
 }
+#endif
 
 LL_TYPE_INSTANCE_HOOK(
     OptiPistonMovingDrawPosHook,
@@ -1189,6 +1490,8 @@ LL_TYPE_INSTANCE_HOOK(
     origin(source, packet);
 }
 
+// Other versions only export tessellateBlockInWorld, hooked below.
+#if OPTIPISTON_MC == 2620
 LL_TYPE_INSTANCE_HOOK(
     OptiPistonMeshInWorldHook,
     ll::memory::HookPriority::Normal,
@@ -1205,6 +1508,7 @@ LL_TYPE_INSTANCE_HOOK(
     if (meshSuppressed(pos)) return false;
     return origin(tessellator, block, pos, useCalcWithCache);
 }
+#endif
 
 LL_TYPE_INSTANCE_HOOK(
     OptiPistonMeshBlockInWorldHook,
@@ -1255,173 +1559,91 @@ LL_TYPE_INSTANCE_HOOK(
     _setDirty(min, max, true, false, false);
 }
 
+template <class Hook>
+bool installHook(bool& installed) {
+    if (!installed) installed = Hook::hook() == 0;
+    return installed;
+}
+
+template <class Hook>
+void removeHook(bool& installed) {
+    if (!installed) return;
+    Hook::unhook();
+    installed = false;
+}
+
+// Hooks in install order; unhooked in reverse. The action hook is last, so no visual starts before everything
+// that finishes it is in place.
+#if OPTIPISTON_MC == 2610
+#define OPTIPISTON_RENDER_HOOKS(X) X(OptiPistonBlockActorDispatchHook)
+#else
+#define OPTIPISTON_RENDER_HOOKS(X) X(OptiPistonPistonArmHook) X(OptiPistonMovingBlockGhostHook)
+#endif
+#if OPTIPISTON_MC == 2620
+#define OPTIPISTON_MESH_IN_WORLD_HOOK(X) X(OptiPistonMeshInWorldHook)
+#define OPTIPISTON_PROGRESS_HOOK(X)      X(OptiPistonPistonProgressHook)
+#else
+#define OPTIPISTON_MESH_IN_WORLD_HOOK(X)
+#define OPTIPISTON_PROGRESS_HOOK(X)
+#endif
+#if OPTIPISTON_MC == 2620 || OPTIPISTON_MC == 2632
+#define OPTIPISTON_START_REBUILD_HOOK(X) X(OptiPistonStartRebuildHook)
+#else
+#define OPTIPISTON_START_REBUILD_HOOK(X)
+#endif
+#if OPTIPISTON_MC <= 2620
+#define OPTIPISTON_BLOCK_FOR_HOOK(X) X(OptiPistonBlockForEntityHook)
+#else
+#define OPTIPISTON_BLOCK_FOR_HOOK(X)
+#endif
+
+#define OPTIPISTON_ALL_HOOKS(X)                                                                                        \
+    X(OptiPistonPistonArmVisibilityHook)                                                                               \
+    OPTIPISTON_RENDER_HOOKS(X)                                                                                         \
+    X(OptiPistonPistonStepHook)                                                                                        \
+    X(OptiPistonMovingBlockConstructionHook)                                                                           \
+    OPTIPISTON_MESH_IN_WORLD_HOOK(X)                                                                                   \
+    X(OptiPistonMeshBlockInWorldHook)                                                                                  \
+    X(OptiPistonFaceOcclusionHook)                                                                                     \
+    X(OptiPistonImmediateRebuildHook)                                                                                  \
+    X(OptiPistonBlockActorDtorHook)                                                                                    \
+    OPTIPISTON_START_REBUILD_HOOK(X)                                                                                   \
+    X(OptiPistonRebuildHook)                                                                                           \
+    X(OptiPistonEndRebuildHook)                                                                                        \
+    X(OptiPistonFrameHook)                                                                                             \
+    X(OptiPistonPlayerQueueEntitiesHook)                                                                               \
+    OPTIPISTON_BLOCK_FOR_HOOK(X)                                                                                       \
+    X(OptiPistonLandedBlockHook)                                                                                       \
+    OPTIPISTON_PROGRESS_HOOK(X)                                                                                        \
+    X(OptiPistonMovingDrawPosHook)                                                                                     \
+    X(OptiPistonBlockActorDataHandlerHook)                                                                             \
+    X(OptiPistonPistonActionHook)
+
+#define OPTIPISTON_HOOK_ENTRY(H) {&installHook<H>, &removeHook<H>},
+
+struct HookEntry {
+    bool (*install)(bool&);
+    void (*remove)(bool&);
+};
+constexpr HookEntry kHooks[] = {OPTIPISTON_ALL_HOOKS(OPTIPISTON_HOOK_ENTRY)};
+
 } // namespace
 
 bool hookPistonRender(bool enable) {
-    struct HookState {
-        bool arm{};
-        bool armRender{};
-        bool step{};
-        bool ghost{};
-        bool movingCtor{};
-        bool action{};
-        bool progress{};
-        bool drawPos{};
-        bool landed{};
-        bool meshInWorld{};
-        bool meshBlockInWorld{};
-        bool faceOcclusion{};
-        bool immediateRebuild{};
-        bool actorDtor{};
-        bool startRebuild{};
-        bool rebuild{};
-        bool endRebuild{};
-        bool frame{};
-        bool playerQueueEntities{};
-        bool blockFor{};
-        bool dataHandler{};
-    };
-    static HookState state;
-
-    auto installAll = [&] {
-        if (!state.arm) state.arm = OptiPistonPistonArmVisibilityHook::hook() == 0;
-        if (!state.arm) return false;
-        if (!state.armRender) state.armRender = OptiPistonPistonArmHook::hook() == 0;
-        if (!state.armRender) return false;
-        if (!state.step) state.step = OptiPistonPistonStepHook::hook() == 0;
-        if (!state.step) return false;
-        if (!state.ghost) state.ghost = OptiPistonMovingBlockGhostHook::hook() == 0;
-        if (!state.ghost) return false;
-        if (!state.movingCtor) state.movingCtor = OptiPistonMovingBlockConstructionHook::hook() == 0;
-        if (!state.movingCtor) return false;
-        if (!state.meshInWorld) state.meshInWorld = OptiPistonMeshInWorldHook::hook() == 0;
-        if (!state.meshInWorld) return false;
-        if (!state.meshBlockInWorld) state.meshBlockInWorld = OptiPistonMeshBlockInWorldHook::hook() == 0;
-        if (!state.meshBlockInWorld) return false;
-        if (!state.faceOcclusion) state.faceOcclusion = OptiPistonFaceOcclusionHook::hook() == 0;
-        if (!state.faceOcclusion) return false;
-        if (!state.immediateRebuild) state.immediateRebuild = OptiPistonImmediateRebuildHook::hook() == 0;
-        if (!state.immediateRebuild) return false;
-        if (!state.actorDtor) state.actorDtor = OptiPistonBlockActorDtorHook::hook() == 0;
-        if (!state.actorDtor) return false;
-        if (!state.startRebuild) state.startRebuild = OptiPistonStartRebuildHook::hook() == 0;
-        if (!state.startRebuild) return false;
-        if (!state.rebuild) state.rebuild = OptiPistonRebuildHook::hook() == 0;
-        if (!state.rebuild) return false;
-        if (!state.endRebuild) state.endRebuild = OptiPistonEndRebuildHook::hook() == 0;
-        if (!state.endRebuild) return false;
-        if (!state.frame) state.frame = OptiPistonFrameHook::hook() == 0;
-        if (!state.frame) return false;
-        if (!state.playerQueueEntities) state.playerQueueEntities = OptiPistonPlayerQueueEntitiesHook::hook() == 0;
-        if (!state.playerQueueEntities) return false;
-        if (!state.blockFor) state.blockFor = OptiPistonBlockForEntityHook::hook() == 0;
-        if (!state.blockFor) return false;
-        if (!state.landed) state.landed = OptiPistonLandedBlockHook::hook() == 0;
-        if (!state.landed) return false;
-        if (!state.progress) state.progress = OptiPistonPistonProgressHook::hook() == 0;
-        if (!state.progress) return false;
-        if (!state.drawPos) state.drawPos = OptiPistonMovingDrawPosHook::hook() == 0;
-        if (!state.drawPos) return false;
-        if (!state.dataHandler) state.dataHandler = OptiPistonBlockActorDataHandlerHook::hook() == 0;
-        if (!state.dataHandler) return false;
-        // Last, so no visual starts before everything that finishes it is in place.
-        if (!state.action) state.action = OptiPistonPistonActionHook::hook() == 0;
-        return state.action;
-    };
+    static bool installed[std::size(kHooks)]{};
 
     if (enable) {
         if (gInstalled.load(std::memory_order_acquire)) return true;
-        if (!installAll()) return false;
+        for (std::size_t i = 0; i < std::size(kHooks); ++i) {
+            if (!kHooks[i].install(installed[i])) return false;
+        }
         gInstalled.store(true, std::memory_order_release);
         return true;
     }
 
     if (!gInstalled.load(std::memory_order_acquire)) return true;
 
-    if (state.action) {
-        OptiPistonPistonActionHook::unhook();
-        state.action = false;
-    }
-    if (state.dataHandler) {
-        OptiPistonBlockActorDataHandlerHook::unhook();
-        state.dataHandler = false;
-    }
-    if (state.drawPos) {
-        OptiPistonMovingDrawPosHook::unhook();
-        state.drawPos = false;
-    }
-    if (state.progress) {
-        OptiPistonPistonProgressHook::unhook();
-        state.progress = false;
-    }
-    if (state.landed) {
-        OptiPistonLandedBlockHook::unhook();
-        state.landed = false;
-    }
-    if (state.blockFor) {
-        OptiPistonBlockForEntityHook::unhook();
-        state.blockFor = false;
-    }
-    if (state.playerQueueEntities) {
-        OptiPistonPlayerQueueEntitiesHook::unhook();
-        state.playerQueueEntities = false;
-    }
-    if (state.frame) {
-        OptiPistonFrameHook::unhook();
-        state.frame = false;
-    }
-    if (state.endRebuild) {
-        OptiPistonEndRebuildHook::unhook();
-        state.endRebuild = false;
-    }
-    if (state.rebuild) {
-        OptiPistonRebuildHook::unhook();
-        state.rebuild = false;
-    }
-    if (state.startRebuild) {
-        OptiPistonStartRebuildHook::unhook();
-        state.startRebuild = false;
-    }
-    if (state.actorDtor) {
-        OptiPistonBlockActorDtorHook::unhook();
-        state.actorDtor = false;
-    }
-    if (state.immediateRebuild) {
-        OptiPistonImmediateRebuildHook::unhook();
-        state.immediateRebuild = false;
-    }
-    if (state.faceOcclusion) {
-        OptiPistonFaceOcclusionHook::unhook();
-        state.faceOcclusion = false;
-    }
-    if (state.meshBlockInWorld) {
-        OptiPistonMeshBlockInWorldHook::unhook();
-        state.meshBlockInWorld = false;
-    }
-    if (state.meshInWorld) {
-        OptiPistonMeshInWorldHook::unhook();
-        state.meshInWorld = false;
-    }
-    if (state.movingCtor) {
-        OptiPistonMovingBlockConstructionHook::unhook();
-        state.movingCtor = false;
-    }
-    if (state.ghost) {
-        OptiPistonMovingBlockGhostHook::unhook();
-        state.ghost = false;
-    }
-    if (state.step) {
-        OptiPistonPistonStepHook::unhook();
-        state.step = false;
-    }
-    if (state.armRender) {
-        OptiPistonPistonArmHook::unhook();
-        state.armRender = false;
-    }
-    if (state.arm) {
-        OptiPistonPistonArmVisibilityHook::unhook();
-        state.arm = false;
-    }
+    for (std::size_t i = std::size(kHooks); i-- > 0;) kHooks[i].remove(installed[i]);
 
     gTailAnchors.clear();
     {

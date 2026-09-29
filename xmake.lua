@@ -2,16 +2,20 @@ add_rules("mode.debug", "mode.release")
 
 add_repositories("levimc-repo https://github.com/LiteLDev/xmake-repo.git")
 
--- One DLL per Minecraft version; each value maps to a src/platform/mcXXXX adapter.
-local platforms = {
-    ["26.20"] = "mc2620",
+-- One DLL per Minecraft version; the value is exposed to the adapter as OPTIPISTON_MC.
+local mc_codes = {
+    ["26.10"] = 2610,
+    ["26.20"] = 2620,
+    ["26.32"] = 2632,
+    ["26.40"] = 2640,
+    ["26.51"] = 2651,
 }
 
 option("mc")
     set_default("26.20")
     set_showmenu(true)
     set_description("Target Minecraft version")
-    set_values("26.20")
+    set_values("26.10", "26.20", "26.32", "26.40", "26.51")
 option_end()
 
 -- levibuildscript reads target_type for the prelink target and the manifest platform.
@@ -22,8 +26,8 @@ option("target_type")
 option_end()
 
 local mc_version = get_config("mc") or "26.20"
-local platform_dir = platforms[mc_version]
-if not platform_dir then
+local mc_code = mc_codes[mc_version]
+if not mc_code then
     raise("OptiPiston has no platform adapter for Minecraft " .. mc_version)
 end
 
@@ -74,7 +78,8 @@ local function windows_flags()
             "-Wno-pragma-system-header-outside-header",
             {tools = {"clang_cl"}}
         )
-        set_toolchains("clang-cl")
+        -- The rapidjson bundled with LeviLamina 26.10 does not compile under current clang.
+        set_toolchains(mc_version == "26.10" and "msvc" or "clang-cl")
     end
     set_languages("c++20")
     set_symbols("debug")
@@ -98,8 +103,9 @@ target("OptiPiston")
         add_defines("DEBUG")
     end
     add_headerfiles("src/mod/**.h", "src/platform/*.h", "include/optipiston/*.h", "include/optipiston/*.hpp")
-    add_files("src/mod/**.cpp", "src/platform/" .. platform_dir .. "/**.cpp")
+    add_files("src/mod/**.cpp", "src/platform/bedrock/**.cpp")
     add_includedirs("src", "include")
+    add_defines("OPTIPISTON_MC=" .. mc_code)
     on_load(function (target)
         -- A repo without commits or tags makes git describe fail.
         local git_tag = try { function () return os.iorun("git describe --tags --abbrev=0 --always") end }

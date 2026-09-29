@@ -7,7 +7,7 @@
   <p>
     <img src="https://img.shields.io/badge/version-v0.1.0-4c8bf5?style=flat-square" alt="OptiPiston v0.1.0">
     <img src="https://img.shields.io/badge/Minecraft%20Bedrock-Windows%20x64-62b47a?style=flat-square" alt="Minecraft Bedrock for Windows x64">
-    <img src="https://img.shields.io/badge/LeviLamina-26.20.*-7b68ee?style=flat-square" alt="LeviLamina 26.20">
+    <img src="https://img.shields.io/badge/LeviLamina-26.10%E2%80%9326.51-7b68ee?style=flat-square" alt="LeviLamina 26.10 to 26.51">
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue?style=flat-square" alt="AGPL-3.0 license"></a>
   </p>
 
@@ -34,12 +34,18 @@ OptiPiston redraws piston arms and the blocks they push on a smooth, configurabl
 > [!IMPORTANT]
 > Use a clean LeviLamina client instance when possible. Broad compatibility with other mods is not currently guaranteed.
 
-1. Create or select a LeviLamina `26.20.*` client instance.
-2. Install the OptiPiston `#client` release through LeviLauncher/Lip, or run this from the instance root:
+1. Create or select a LeviLamina client instance for one of the versions in [Compatibility](#compatibility).
+2. Install the matching OptiPiston `#client` release through LeviLauncher/Lip, or run the line for your version from the instance root:
 
    ```powershell
+   lip install github.com/wo55555/OptiPiston@0.1.0-mc26.10#client
    lip install github.com/wo55555/OptiPiston@0.1.0-mc26.20#client
+   lip install github.com/wo55555/OptiPiston@0.1.0-mc26.30#client
+   lip install github.com/wo55555/OptiPiston@0.1.0-mc26.40#client
+   lip install github.com/wo55555/OptiPiston@0.1.0-mc26.50#client
    ```
+
+   Lip does not pick a release from the installed LeviLamina version, so choose the one listed for your instance in [Compatibility](#compatibility).
 
 3. Launch the game and open a world. Piston animation is on by default; use `/optipiston status` to check the current state.
 
@@ -121,15 +127,19 @@ API v1 also reads and writes the piston toggle and duration. Setters clamp to th
 
 ## Compatibility
 
-| Minecraft / LeviLamina | OptiPiston release | Status      |
-| ---------------------- | ------------------ | ----------- |
-| `26.20.*`              | `v0.1.0-mc26.20`   | Development |
+| Minecraft line | LeviLamina | Release                                                                               | Status                             |
+| -------------- | ---------- | ------------------------------------------------------------------------------------- | ---------------------------------- |
+| 26.10          | `26.10.*`  | [`v0.1.0-mc26.10`](https://github.com/wo55555/OptiPiston/releases/tag/v0.1.0-mc26.10) | Prerelease; not yet tested in game |
+| 26.20          | `26.20.*`  | [`v0.1.0-mc26.20`](https://github.com/wo55555/OptiPiston/releases/tag/v0.1.0-mc26.20) | Prerelease; tested in game         |
+| 26.30          | `26.32.*`  | [`v0.1.0-mc26.30`](https://github.com/wo55555/OptiPiston/releases/tag/v0.1.0-mc26.30) | Prerelease; not yet tested in game |
+| 26.40          | `26.40.*`  | [`v0.1.0-mc26.40`](https://github.com/wo55555/OptiPiston/releases/tag/v0.1.0-mc26.40) | Prerelease; not yet tested in game |
+| 26.50          | `26.51.*`  | [`v0.1.0-mc26.50`](https://github.com/wo55555/OptiPiston/releases/tag/v0.1.0-mc26.50) | Prerelease; not yet tested in game |
 
-OptiPiston targets Minecraft Bedrock for Windows x64 and is distributed as a client-only mod. Other Minecraft versions are not supported yet.
+Each line has its own release, which only loads on the listed LeviLamina version. All currently published releases are prereleases. OptiPiston targets Minecraft Bedrock for Windows x64 and is distributed as a client-only mod.
 
 ## Build From Source
 
-OptiPiston builds on Windows x64 with xmake, LLVM (clang-cl, CI uses LLVM 22), and Git:
+OptiPiston builds on Windows x64 with xmake, LLVM (clang-cl, CI uses LLVM 22), and Git. `--mc` selects the Minecraft version: `26.10`, `26.20`, `26.32`, `26.40`, or `26.51`. The `26.10` build uses MSVC (Visual Studio 2022) instead, because the rapidjson bundled with LeviLamina 26.10 does not compile under current clang.
 
 ```powershell
 xmake f -y -p windows -a x64 -m release --target_type=client --mc=26.20
@@ -138,11 +148,12 @@ xmake build optipiston-tests
 xmake run optipiston-tests
 ```
 
-The mod is written to `bin/OptiPiston/`.
+The mod is written to `bin/OptiPiston/`. Switching `--mc` needs a fresh configure (`xmake f -c ...`) and overwrites the previous build there.
 
 ## Known Limitations
 
-- Only Minecraft 26.20 is supported.
+- Only 26.20 has been tested in game. The other versions are ported from the LeviLamina headers and only verified to build.
+- Outside 26.20, some hooks use different entry points: the frame counter follows `LevelRenderer::renderLevel`, and the arm's visual progress applies only while the arm is drawn. From 26.32 the camera no longer looks up a block per block actor, so the step that keeps a held moving block drawn after its real block lands is skipped. These paths may differ slightly at the start or end of a move.
 - Tested in local worlds and Playback replays; multiplayer servers are not yet verified.
 - Blocks moved by a piston can flicker darker while moving. Vanilla does the same; it is not fixed yet.
 - World speed is singleplayer only and does not persist across restarts.

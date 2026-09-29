@@ -2,7 +2,7 @@
     "format_version": 3,
     "format_uuid": "289f771f-2c9a-4d73-9f3f-8492495a924d",
     "tooth": "github.com/wo55555/OptiPiston",
-    "version": "0.1.0-mc26.20",
+    "version": "0.1.0-mc26.10",
     "info": {
         "name": "OptiPiston",
         "description": "Client-side smooth piston animation with configurable duration and singleplayer world speed.",
@@ -20,7 +20,7 @@
             "label": "client",
             "platform": "win-x64",
             "dependencies": {
-                "github.com/LiteLDev/LeviLamina#client": "26.20.*"
+                "github.com/LiteLDev/LeviLamina#client": "26.10.*"
             },
             "assets": [
                 {

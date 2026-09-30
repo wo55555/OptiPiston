@@ -7,29 +7,54 @@ ExternalClock& externalClock() noexcept {
     return clock;
 }
 
+// Caller holds mWriteMutex.
+void ExternalClock::beginWrite() noexcept {
+    mSeq.store(mSeq.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_release);
+}
+
+void ExternalClock::endWrite() noexcept {
+    mSeq.store(mSeq.load(std::memory_order_relaxed) + 1, std::memory_order_release);
+}
+
 void ExternalClock::set(int64_t tick, uint64_t epoch) noexcept {
-    std::lock_guard const guard(mMutex);
-    mActive = true;
-    mTick   = tick;
-    mEpoch  = epoch;
+    std::lock_guard const guard(mWriteMutex);
+    beginWrite();
+    mActive.store(true, std::memory_order_relaxed);
+    mTick.store(tick, std::memory_order_relaxed);
+    mEpoch.store(epoch, std::memory_order_relaxed);
+    endWrite();
 }
 
 void ExternalClock::setPartial(std::optional<float> partial) noexcept {
     if (partial && !(*partial >= 0.0f && *partial <= 1.0f)) partial.reset();
-    std::lock_guard const guard(mMutex);
-    mPartial = partial;
+    std::lock_guard const guard(mWriteMutex);
+    beginWrite();
+    mPartial.store(partial.value_or(-1.0f), std::memory_order_relaxed);
+    endWrite();
 }
 
 void ExternalClock::clear() noexcept {
-    std::lock_guard const guard(mMutex);
-    mActive = false;
-    mPartial.reset();
+    std::lock_guard const guard(mWriteMutex);
+    beginWrite();
+    mActive.store(false, std::memory_order_relaxed);
+    mPartial.store(-1.0f, std::memory_order_relaxed);
+    endWrite();
 }
 
 std::optional<ClockSample> ExternalClock::sample() const noexcept {
-    std::lock_guard const guard(mMutex);
-    if (!mActive) return std::nullopt;
-    return ClockSample{mTick, mEpoch, true, mPartial};
+    for (;;) {
+        auto const before = mSeq.load(std::memory_order_acquire);
+        if (before & 1) continue;
+        bool const  active  = mActive.load(std::memory_order_relaxed);
+        auto const  tick    = mTick.load(std::memory_order_relaxed);
+        auto const  epoch   = mEpoch.load(std::memory_order_relaxed);
+        float const partial = mPartial.load(std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (mSeq.load(std::memory_order_relaxed) != before) continue;
+        if (!active) return std::nullopt;
+        return ClockSample{tick, epoch, true, partial >= 0.0f ? std::optional<float>{partial} : std::nullopt};
+    }
 }
 
 bool ClockTracker::invalidated(ClockSample const& sample) noexcept {

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <mutex>
 #include <optional>
@@ -25,11 +26,16 @@ public:
     [[nodiscard]] std::optional<ClockSample> sample() const noexcept;
 
 private:
-    mutable std::mutex   mMutex;
-    bool                 mActive{};
-    int64_t              mTick{};
-    uint64_t             mEpoch{};
-    std::optional<float> mPartial;
+    // Seqlock: render hooks read this many times per frame, so readers never take the writers' mutex.
+    void beginWrite() noexcept;
+    void endWrite() noexcept;
+
+    std::mutex            mWriteMutex;
+    std::atomic<uint64_t> mSeq{0};
+    std::atomic<bool>     mActive{};
+    std::atomic<int64_t>  mTick{};
+    std::atomic<uint64_t> mEpoch{};
+    std::atomic<float>    mPartial{-1.0f}; // negative: none
 };
 
 [[nodiscard]] ExternalClock& externalClock() noexcept;

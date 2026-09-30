@@ -1,6 +1,7 @@
 #include "platform/Features.h"
 
 #include "core/Clock.h"
+#include "core/Limits.h"
 #include "core/Segment.h"
 #include "core/Settings.h"
 
@@ -69,10 +70,12 @@
 #include <algorithm>
 #include <atomic>
 #include <bitset>
+#include <cmath>
 #include <cstdint>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -107,12 +110,13 @@ struct BlockPosHash {
 #endif
 }
 
-std::string wrappedName(::MovingBlockActor const& moving) {
+// A view into the block's registered name, so the per-frame render path does not allocate.
+std::string_view wrappedName(::MovingBlockActor const& moving) {
 #if OPTIPISTON_MC == 2620
     return moving.getWrappedBlock().getTypeName();
 #else
     ::Block const* block = moving.mWrappedBlock;
-    return block ? std::string{block->getTypeName()} : std::string{"minecraft:air"};
+    return block ? std::string_view{block->getTypeName()} : std::string_view{"minecraft:air"};
 #endif
 }
 
@@ -267,10 +271,13 @@ struct MovingEntry {
 std::vector<std::shared_ptr<::BlockActor>> gDropKeep;
 
 std::unordered_map<::MovingBlockActor const*, MovingEntry> gMovingAction;
-std::unordered_map<::BlockPos, CellClaim, BlockPosHash>    gCellClaims;
-std::atomic_bool                                           gMeshWatch{false};
-std::atomic_bool                                           gFaceWatch{false}; // any unreleased claim
-std::atomic<uint64_t>                                      gFrameLt{0};
+// gMovingAction keys by target cell, so per-cell lookups on the render path skip a full scan.
+std::unordered_map<::BlockPos, std::vector<::MovingBlockActor const*>, BlockPosHash> gMovingByCell;
+std::unordered_map<::BlockPos, CellClaim, BlockPosHash>                              gCellClaims;
+std::atomic_bool                                                                     gMeshWatch{false};
+std::atomic_bool      gFaceWatch{false};   // any unreleased claim
+std::atomic_bool      gLandedWatch{false}; // any landed, unreleased claim
+std::atomic<uint64_t> gFrameLt{0};
 // Counts frames that drew block actors; export also renders passes without them.
 std::atomic<uint64_t> gFrame{1};
 std::atomic_bool      gFrameDrewActors{false};
@@ -324,6 +331,14 @@ float armValue(PistonVisual const& visual, double time) {
     };
 }
 
+// Caller holds gAnimMutex.
+template <class Fn>
+void forEachMovingAtLocked(::BlockPos const& cell, Fn&& fn) {
+    auto const it = gMovingByCell.find(cell);
+    if (it == gMovingByCell.end()) return;
+    for (auto const* moving : it->second) fn(gMovingAction.at(moving));
+}
+
 void updateMeshWatchLocked() {
     gMeshWatch.store(
         std::any_of(
@@ -335,6 +350,14 @@ void updateMeshWatchLocked() {
     );
     gFaceWatch.store(
         std::any_of(gCellClaims.begin(), gCellClaims.end(), [](auto const& entry) { return !entry.second.released; }),
+        std::memory_order_relaxed
+    );
+    gLandedWatch.store(
+        std::any_of(
+            gCellClaims.begin(),
+            gCellClaims.end(),
+            [](auto const& entry) { return entry.second.landed && !entry.second.released; }
+        ),
         std::memory_order_relaxed
     );
 }
@@ -349,6 +372,7 @@ std::vector<::BlockPos> clearAnimationStateLocked() {
     for (auto& [moving, entry] : gMovingAction)
         if (entry.keep) gDropKeep.push_back(std::move(entry.keep));
     gMovingAction.clear();
+    gMovingByCell.clear();
     gPendingRemesh.clear();
     gCellClaims.clear();
     gReleasedMesh.clear();
@@ -518,12 +542,12 @@ void startAction(
             cells = endActionLocked(old.action);
         }
         // This piston's body may still be arriving from a push; its arm must follow that motion until it ends.
-        for (auto const& [moving, entry] : gMovingAction) {
-            if (entry.cell != pistonPos || entry.handedOff) continue;
+        forEachMovingAtLocked(pistonPos, [&](MovingEntry const& entry) {
+            if (entry.handedOff) return;
             // A finished tail contributes zero offset, so only the newest carrier matters.
             if (!visual.bodyCarry || entry.visual.segment.startTick > visual.bodyCarry->segment.startTick)
                 visual.bodyCarry = entry.visual;
-        }
+        });
         gActionVisuals[visual.action] = {visual.current, facing};
         gPistonVisuals[pistonPos]     = visual;
         updateMeshWatchLocked();
@@ -573,11 +597,10 @@ std::optional<::Vec3> visualBodyOffset(::BlockPos const& pistonPos, float alpha)
 std::optional<::Vec3> landedBodyOffset(::BlockPos const& pistonPos, float alpha) {
     std::lock_guard const guard(gAnimMutex);
     MovingEntry const*    carrier = nullptr;
-    for (auto const& [moving, entry] : gMovingAction) {
-        if (entry.cell != pistonPos || entry.handedOff || entry.released || !gActionVisuals.contains(entry.action))
-            continue;
+    forEachMovingAtLocked(pistonPos, [&](MovingEntry const& entry) {
+        if (entry.handedOff || entry.released || !gActionVisuals.contains(entry.action)) return;
         if (!carrier || entry.visual.segment.startTick > carrier->visual.segment.startTick) carrier = &entry;
-    }
+    });
     if (!carrier) return std::nullopt;
     auto const time   = visualTime(alpha);
     auto       offset = actionOffset(carrier->visual, time);
@@ -619,12 +642,12 @@ void registerMoving(::MovingBlockActor const& moving, ::BlockSource& region) {
     int const        dir    = visual->second.segment.to > visual->second.segment.from ? 1 : -1;
     ::BlockPos const source{cell.x - facing.x * dir, cell.y - facing.y * dir, cell.z - facing.z * dir};
     if (source != moving.mPistonBlockPos.get()) {
-        for (auto& [other, old] : gMovingAction) {
-            if (old.cell != source || old.action == action || old.handedOff) continue;
+        forEachMovingAtLocked(source, [&](MovingEntry& old) {
+            if (old.action == action || old.handedOff) return;
             old.handedOff = true;
             if (!entry.carry || old.visual.segment.startTick > entry.carry->visual.segment.startTick)
                 entry.carry = CarryVisual{old.action, old.visual};
-        }
+        });
         // The old claim would keep its stale copy held in a cell the block already left.
         if (auto const old = gCellClaims.find(source); old != gCellClaims.end() && old->second.action != action) {
             gCellClaims.erase(old);
@@ -633,11 +656,12 @@ void registerMoving(::MovingBlockActor const& moving, ::BlockSource& region) {
     }
     entry.keep             = findOwner(region, moving);
     gMovingAction[&moving] = entry;
-    auto const claim       = gCellClaims.find(cell);
+    gMovingByCell[cell].push_back(&moving);
+    auto const claim = gCellClaims.find(cell);
     // An older claim still hiding its landed block keeps the cell until it is re-meshed.
     if (claim != gCellClaims.end() && claim->second.landed && !claim->second.released) return;
     if (claim != gCellClaims.end() && claim->second.action == action) return;
-    gCellClaims[cell] = {action, wrappedName(moving)};
+    gCellClaims[cell] = {action, std::string{wrappedName(moving)}};
     updateMeshWatchLocked();
 }
 
@@ -652,8 +676,9 @@ bool movingHeld(::MovingBlockActor const& moving) {
     // The real block is on screen only from the frame after its mesh was uploaded.
     if (!claim->second.rebuilt || gFrame.load(std::memory_order_relaxed) <= claim->second.liveFrame) return true;
     // Every MovingBlock sharing this claim is covered by the same rebuilt mesh.
-    for (auto& [other, entry] : gMovingAction)
-        if (entry.action == claim->second.action && entry.cell == claim->first) entry.released = true;
+    forEachMovingAtLocked(claim->first, [action = claim->second.action](MovingEntry& entry) {
+        if (entry.action == action) entry.released = true;
+    });
     gCellClaims.erase(claim);
     updateMeshWatchLocked();
     return false;
@@ -681,7 +706,10 @@ void holdLandedCell(::BlockPos const& cell, std::string const& block) {
 }
 
 // A replay can place the real block before its MovingBlock is first drawn, with no landing packet.
-void holdPlacedCell(::BlockPos const& cell, std::string const& block) {
+void holdPlacedCell(::BlockSource& region, ::BlockPos const& cell) {
+    // Only an unreleased claim can be held, and gFaceWatch is set exactly while one exists.
+    if (!gFaceWatch.load(std::memory_order_relaxed)) return;
+    auto const&           block = region.getBlock(cell).getTypeName();
     std::lock_guard const guard(gAnimMutex);
     auto const            it = gCellClaims.find(cell);
     if (it == gCellClaims.end() || it->second.landed || it->second.released || it->second.wrapped != block) return;
@@ -696,6 +724,10 @@ void forgetMoving(::MovingBlockActor const* moving) {
     auto const            it = gMovingAction.find(moving);
     if (it == gMovingAction.end()) return;
     if (it->second.keep) gDropKeep.push_back(std::move(it->second.keep));
+    if (auto const cell = gMovingByCell.find(it->second.cell); cell != gMovingByCell.end()) {
+        std::erase(cell->second, moving);
+        if (cell->second.empty()) gMovingByCell.erase(cell);
+    }
     gMovingAction.erase(it);
 }
 
@@ -711,7 +743,7 @@ int neighborHidden(::BlockPos const& pos) {
 
 // Full cubes cull against simple neighbours through the chunk's bitset, never asking the occluder.
 bool touchesLanded(::BlockPos const& pos) {
-    if (tRenderDepth > 0 || !gFaceWatch.load(std::memory_order_relaxed)) return false;
+    if (tRenderDepth > 0 || !gLandedWatch.load(std::memory_order_relaxed)) return false;
     static ::BlockPos const dirs[6]{
         {0,  -1, 0 },
         {0,  1,  0 },
@@ -720,8 +752,12 @@ bool touchesLanded(::BlockPos const& pos) {
         {-1, 0,  0 },
         {1,  0,  0 }
     };
-    for (auto const& dir : dirs)
-        if (neighborHidden(pos + dir) == 1) return true;
+    // One lock for all six faces; mesh threads call this for every block of every rebuilt subchunk.
+    std::lock_guard const guard(gAnimMutex);
+    for (auto const& dir : dirs) {
+        auto const it = gCellClaims.find(pos + dir);
+        if (it != gCellClaims.end() && it->second.landed && !it->second.released) return true;
+    }
     return false;
 }
 
@@ -731,6 +767,25 @@ bool heldLocked(MovingEntry const& entry) {
     if (gActionVisuals.contains(entry.action)) return true;
     auto const claim = gCellClaims.find(entry.cell);
     return claim != gCellClaims.end() && claim->second.action == entry.action;
+}
+
+// Appends the items neither queue holds yet. One pass over the queues instead of one search per item.
+void queueMissing(::LevelRendererCamera& camera, std::vector<QueuedItem*>& items) {
+    if (items.empty()) return;
+    std::sort(items.begin(), items.end());
+    items.erase(std::unique(items.begin(), items.end()), items.end());
+    auto&             queue = opaqueQueueOf(camera);
+    std::vector<bool> present(items.size());
+    auto const        mark = [&](auto const& list) {
+        for (auto const& queued : list) {
+            auto const it = std::lower_bound(items.begin(), items.end(), queued.get());
+            if (it != items.end() && *it == queued.get()) present[it - items.begin()] = true;
+        }
+    };
+    mark(queue);
+    mark(alphaQueueOf(camera));
+    for (std::size_t i = 0; i < items.size(); ++i)
+        if (!present[i]) queue.emplace_back(items[i]);
 }
 
 // A MovingBlock created in a cell pushed again right after landing can miss the camera's collection for several
@@ -757,17 +812,13 @@ void queueFreshMoving(::LevelRendererCamera& camera) {
             for (auto const& dir : dirs)
                 if (seen.insert(pos + dir).second) cells.push_back(pos + dir);
     }
-    auto& queue = opaqueQueueOf(camera);
-    auto& alpha = alphaQueueOf(camera);
+    std::vector<QueuedItem*> items;
     for (auto const& pos : cells) {
         auto* actor = region.getBlockEntity(pos);
         if (!actor || actor->mType != ::BlockActorType::MovingBlock) continue;
-        auto* const item = queuedItemOf(actor);
-        if (!item) continue;
-        auto const same = [item](auto const& queued) { return queued.get() == item; };
-        if (std::any_of(queue.begin(), queue.end(), same) || std::any_of(alpha.begin(), alpha.end(), same)) continue;
-        queue.emplace_back(item);
+        if (auto* const item = queuedItemOf(actor)) items.push_back(item);
     }
+    queueMissing(camera, items);
 }
 
 // Runs right after the camera re-collects its queues, the only point where a kept instance can be let go
@@ -775,32 +826,31 @@ void queueFreshMoving(::LevelRendererCamera& camera) {
 void requeueHeldMoving(::LevelRendererCamera& camera) {
     std::vector<std::shared_ptr<::BlockActor>> drop;
     {
-        std::lock_guard const guard(gAnimMutex);
-        auto&                 queue  = opaqueQueueOf(camera);
-        auto&                 alpha  = alphaQueueOf(camera);
-        auto&                 shadow = shadowQueueOf(camera);
-        auto const            queued = [](auto const& list, QueuedItem const* item) {
-            return std::any_of(list.begin(), list.end(), [item](auto const& other) { return other.get() == item; });
-        };
+        std::lock_guard const    guard(gAnimMutex);
+        std::vector<QueuedItem*> held;
         for (auto& [moving, entry] : gMovingAction) {
             auto* actor = static_cast<::BlockActor*>(const_cast<::MovingBlockActor*>(moving));
             if (!heldLocked(entry)) {
                 if (entry.keep) drop.push_back(std::move(entry.keep));
                 continue;
             }
-            auto* const item = queuedItemOf(actor);
-            if (!item || queued(queue, item) || queued(alpha, item)) continue;
-            queue.emplace_back(item);
+            if (auto* const item = queuedItemOf(actor)) held.push_back(item);
         }
+        queueMissing(camera, held);
         drop.insert(drop.end(), std::make_move_iterator(gDropKeep.begin()), std::make_move_iterator(gDropKeep.end()));
         gDropKeep.clear();
         // Only this reference keeps it alive, so only our requeue put it here.
-        for (auto const& ref : drop) {
-            if (ref.use_count() != 1) continue;
-            auto const same = [item = queuedItemOf(ref.get())](auto const& other) { return other.get() == item; };
-            std::erase_if(queue, same);
-            std::erase_if(alpha, same);
-            std::erase_if(shadow, same);
+        std::vector<QueuedItem const*> gone;
+        for (auto const& ref : drop)
+            if (ref.use_count() == 1) gone.push_back(queuedItemOf(ref.get()));
+        if (!gone.empty()) {
+            std::sort(gone.begin(), gone.end());
+            auto const same = [&gone](auto const& other) {
+                return std::binary_search(gone.begin(), gone.end(), static_cast<QueuedItem const*>(other.get()));
+            };
+            std::erase_if(opaqueQueueOf(camera), same);
+            std::erase_if(alphaQueueOf(camera), same);
+            std::erase_if(shadowQueueOf(camera), same);
         }
     }
     // The dtor hook locks gAnimMutex.
@@ -1021,7 +1071,7 @@ void drawMoving(::BaseActorRenderContext&, ::BlockSource& source, ::BlockActor& 
 
     if (animationActive()) {
         registerMoving(*movingPtr, source);
-        holdPlacedCell(entity.mPosition.get(), source.getBlock(entity.mPosition).getTypeName());
+        holdPlacedCell(source, entity.mPosition.get());
         // A successor or the rebuilt mesh already shows this block; a second copy would be a ghost.
         if (movingRetired(*movingPtr)) return;
         // The visual owns this block until the real block is re-meshed; native retirement would cut it short.
@@ -1414,9 +1464,11 @@ LL_TYPE_INSTANCE_HOOK(
     --tBlockActorDataDepth;
     if (!held || tBlockActorDataApplied) return;
     std::lock_guard const guard(gAnimMutex);
-    // Data held on an earlier clock run can no longer be placed on the timeline.
+    // Data from an earlier clock run, or older than the longest visual, could only start an already expired visual.
+    // A live world never changes run, so the age bound is what keeps this list short.
+    auto const maxAge = static_cast<int64_t>(std::ceil(core::MaxDurationTicks));
     std::erase_if(gHeldPistonData, [&](HeldPistonData const& entry) {
-        return !sameClockRun(entry.clock, held->clock);
+        return !sameClockRun(entry.clock, held->clock) || held->clock.tick - entry.clock.tick > maxAge;
     });
     gHeldPistonData.push_back(std::move(*held));
 }

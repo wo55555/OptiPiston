@@ -16,6 +16,7 @@
 #include "mc/client/renderer/block/BlockOccluder.h"
 #include "mc/client/renderer/block/BlockTessellator.h"
 #include "mc/client/renderer/blockactor/BlockActorRenderData.h"
+#include "mc/client/renderer/blockactor/BlockActorRenderDispatcher.h"
 #include "mc/client/renderer/blockactor/MovingBlockActorRenderer.h"
 #include "mc/client/renderer/blockactor/PistonBlockActorRenderer.h"
 #include "mc/client/renderer/chunks/RenderChunkCoordinator.h"
@@ -24,6 +25,9 @@
 #include "mc/client/renderer/game/LevelRendererCamera.h"
 #include "mc/client/renderer/game/LevelRendererPlayer.h"
 #include "mc/deps/core/math/Vec3.h"
+#include "mc/deps/minecraft_renderer/framebuilder/dragon/RenderMetadata.h"
+#include "mc/deps/minecraft_renderer/renderer/MaterialPtr.h"
+#include "mc/deps/minecraft_renderer/resources/ClientTexture.h"
 #include "mc/deps/nbt/CompoundTag.h"
 #include "mc/network/NetworkIdentifier.h"
 #include "mc/network/packet/BlockActorDataPacket.h"
@@ -51,11 +55,7 @@
 #include "mc/world/phys/AABB.h"
 
 #if OPTIPISTON_MC == 2610
-#include "mc/client/renderer/blockactor/BlockActorRenderDispatcher.h"
 #include "mc/client/renderer/chunks/RenderChunkBuilder.h"
-#include "mc/deps/minecraft_renderer/framebuilder/dragon/RenderMetadata.h"
-#include "mc/deps/minecraft_renderer/renderer/MaterialPtr.h"
-#include "mc/deps/minecraft_renderer/resources/ClientTexture.h"
 #include "mc/world/level/block/PistonBlock.h"
 #include "mc/world/level/block/VanillaStates.h"
 #endif
@@ -266,6 +266,8 @@ struct MovingEntry {
     std::optional<CarryVisual> carry;
     // The chunk may destroy a detached instance before its cell is re-meshed.
     std::shared_ptr<::BlockActor> keep;
+    // Read while the instance was being drawn, so later checks need not touch it.
+    bool carriesActor{};
 };
 // Released outside gAnimMutex because the dtor hook locks it.
 std::vector<std::shared_ptr<::BlockActor>> gDropKeep;
@@ -654,7 +656,11 @@ void registerMoving(::MovingBlockActor const& moving, ::BlockSource& region) {
             updateMeshWatchLocked();
         }
     }
-    entry.keep             = findOwner(region, moving);
+    entry.keep = findOwner(region, moving);
+    {
+        std::shared_ptr<::BlockActor> const& copy = moving.mWrappedBlockActor;
+        entry.carriesActor                        = copy != nullptr;
+    }
     gMovingAction[&moving] = entry;
     gMovingByCell[cell].push_back(&moving);
     auto const claim = gCellClaims.find(cell);
@@ -767,6 +773,25 @@ bool heldLocked(MovingEntry const& entry) {
     if (gActionVisuals.contains(entry.action)) return true;
     auto const claim = gCellClaims.find(entry.cell);
     return claim != gCellClaims.end() && claim->second.action == entry.action;
+}
+
+// A landed block's own actor (a chest, a spawner's mob, a lectern's book...) would sit at its final cell while the
+// MovingBlock still carries a copy of it in. Pistons are excluded: drawArm keeps their head on the moving body.
+bool landedActorCovered(::BlockActor const& entity) {
+    if (tRenderDepth > 0 || !gLandedWatch.load(std::memory_order_relaxed)) return false;
+    if (entity.mType == ::BlockActorType::PistonArm || entity.mType == ::BlockActorType::MovingBlock) return false;
+    if (!animationActive()) return false;
+    std::lock_guard const guard(gAnimMutex);
+    auto const            cell  = entity.mPosition.get();
+    auto const            claim = gCellClaims.find(cell);
+    if (claim == gCellClaims.end() || !claim->second.landed || claim->second.released) return false;
+    auto const moving = gMovingByCell.find(cell);
+    if (moving == gMovingByCell.end()) return false;
+    return std::any_of(moving->second.begin(), moving->second.end(), [](::MovingBlockActor const* carrier) {
+        auto const& entry = gMovingAction.at(carrier);
+        // Without its own copy the carrier draws only the block, and hiding the real actor would leave a hole.
+        return entry.carriesActor && !entry.handedOff && !entry.released && gActionVisuals.contains(entry.action);
+    });
 }
 
 // Appends the items neither queue holds yet. One pass over the queues instead of one search per item.
@@ -1166,6 +1191,7 @@ LL_TYPE_INSTANCE_HOOK(
             std::move(renderMetadata)
         );
     };
+    if (landedActorCovered(e)) return;
     // The renderer hooks this replaces only ever covered the opaque pass.
     if (renderAlphaLayer) draw();
     else if (e.mType == ::BlockActorType::PistonArm) drawArm(entityRenderContext, renderSource, e, position, draw);
@@ -1209,6 +1235,105 @@ LL_TYPE_INSTANCE_HOOK(
     drawMoving(renderContext, blockEntityRenderData.renderSource, renderedActor(blockEntityRenderData), [&] {
         origin(renderContext, blockEntityRenderData);
     });
+}
+#endif
+
+#if OPTIPISTON_MC >= 2632
+using DispatchedActor = ::IVanillaRenderBlockActorComponent;
+::BlockActor& dispatchedActor(DispatchedActor& actor) { return actor.getBlockActor(); }
+#else
+using DispatchedActor = ::BlockActor;
+::BlockActor& dispatchedActor(DispatchedActor& actor) { return actor; }
+#endif
+
+// Every block actor type reaches its renderer through the dispatcher; which overload the camera calls is not known,
+// so both skip a covered landed actor.
+LL_TYPE_INSTANCE_HOOK(
+    OptiPistonLandedActorHook,
+    ll::memory::HookPriority::Normal,
+    BlockActorRenderDispatcher,
+    static_cast<void (::BlockActorRenderDispatcher::*)(
+        ::BaseActorRenderContext&,
+        ::BlockSource&,
+        DispatchedActor&,
+        ::Block const&,
+        bool,
+        ::mce::MaterialPtr const&,
+        ::mce::ClientTexture const*,
+        int,
+        std::optional<::dragon::RenderMetadata>
+    )>(&::BlockActorRenderDispatcher::render),
+    void,
+    ::BaseActorRenderContext&               entityRenderContext,
+    ::BlockSource&                          renderSource,
+    DispatchedActor&                        e,
+    ::Block const&                          block,
+    bool                                    renderAlphaLayer,
+    ::mce::MaterialPtr const&               forcedMat,
+    ::mce::ClientTexture const*             forceTex,
+    int                                     breakingAmount,
+    std::optional<::dragon::RenderMetadata> renderMetadata
+) {
+    if (landedActorCovered(dispatchedActor(e))) return;
+    origin(
+        entityRenderContext,
+        renderSource,
+        e,
+        block,
+        renderAlphaLayer,
+        forcedMat,
+        forceTex,
+        breakingAmount,
+        std::move(renderMetadata)
+    );
+}
+
+// 26.10 already routes this overload through OptiPistonBlockActorDispatchHook.
+#if OPTIPISTON_MC != 2610
+LL_TYPE_INSTANCE_HOOK(
+    OptiPistonLandedActorAtHook,
+    ll::memory::HookPriority::Normal,
+    BlockActorRenderDispatcher,
+    static_cast<void (::BlockActorRenderDispatcher::*)(
+        ::BaseActorRenderContext&,
+        ::BlockSource&,
+        DispatchedActor&,
+        ::Block const&,
+        ::Vec3 const&,
+        ::BlockPos const&,
+        bool,
+        ::mce::MaterialPtr const&,
+        ::mce::ClientTexture const*,
+        int,
+        std::optional<::dragon::RenderMetadata>
+    )>(&::BlockActorRenderDispatcher::render),
+    void,
+    ::BaseActorRenderContext&               entityRenderContext,
+    ::BlockSource&                          renderSource,
+    DispatchedActor&                        e,
+    ::Block const&                          block,
+    ::Vec3 const&                           renderPos,
+    ::BlockPos const&                       worldPos,
+    bool                                    renderAlphaLayer,
+    ::mce::MaterialPtr const&               forcedMat,
+    ::mce::ClientTexture const*             forceTex,
+    int                                     breakingAmount,
+    std::optional<::dragon::RenderMetadata> renderMetadata
+) {
+    if (landedActorCovered(dispatchedActor(e))) return;
+    origin(
+        entityRenderContext,
+        renderSource,
+        e,
+        block,
+        renderPos,
+        worldPos,
+        renderAlphaLayer,
+        forcedMat,
+        forceTex,
+        breakingAmount,
+        std::move(renderMetadata)
+    );
 }
 #endif
 
@@ -1627,9 +1752,11 @@ void removeHook(bool& installed) {
 // Hooks in install order; unhooked in reverse. The action hook is last, so no visual starts before everything
 // that finishes it is in place.
 #if OPTIPISTON_MC == 2610
-#define OPTIPISTON_RENDER_HOOKS(X) X(OptiPistonBlockActorDispatchHook)
+#define OPTIPISTON_RENDER_HOOKS(X) X(OptiPistonBlockActorDispatchHook) X(OptiPistonLandedActorHook)
 #else
-#define OPTIPISTON_RENDER_HOOKS(X) X(OptiPistonPistonArmHook) X(OptiPistonMovingBlockGhostHook)
+#define OPTIPISTON_RENDER_HOOKS(X)                                                                                     \
+    X(OptiPistonPistonArmHook)                                                                                         \
+    X(OptiPistonMovingBlockGhostHook) X(OptiPistonLandedActorHook) X(OptiPistonLandedActorAtHook)
 #endif
 #if OPTIPISTON_MC == 2620
 #define OPTIPISTON_MESH_IN_WORLD_HOOK(X) X(OptiPistonMeshInWorldHook)

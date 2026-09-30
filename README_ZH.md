@@ -35,17 +35,13 @@ OptiPiston 按可配置的平滑时间线重新绘制活塞臂及其推动的方
 > 建议尽量使用干净的 LeviLamina 客户端实例；目前不保证与其他模组广泛兼容。
 
 1. 创建或选择[兼容性](#兼容性)中所列版本的 LeviLamina 客户端实例。
-2. 通过 LeviLauncher/Lip 安装对应版本的 OptiPiston `#client` 发行版，或在实例根目录运行与你的版本对应的一行：
+2. 通过 LeviLauncher/Lip 安装对应版本的 OptiPiston `#client` 发行版，或在实例根目录运行下面的命令，并换成[兼容性](#兼容性)中对应的发行版（示例为 26.20）：
 
    ```powershell
-   lip install github.com/wo55555/OptiPiston@0.1.0-mc26.10#client
    lip install github.com/wo55555/OptiPiston@0.1.0-mc26.20#client
-   lip install github.com/wo55555/OptiPiston@0.1.0-mc26.30#client
-   lip install github.com/wo55555/OptiPiston@0.1.0-mc26.40#client
-   lip install github.com/wo55555/OptiPiston@0.1.0-mc26.50#client
    ```
 
-   Lip 不会根据已安装的 LeviLamina 版本自动选择发行版，请按[兼容性](#兼容性)中实例对应的一项选择。
+   Lip 不会根据已安装的 LeviLamina 版本自动选择发行版，请始终指定与实例对应的版本。
 
 3. 启动游戏并进入世界。活塞动画默认开启，可用 `/optipiston status` 查看当前状态。
 
@@ -139,7 +135,7 @@ OptiPiston 面向 Windows x64 平台的 Minecraft 基岩版，以纯客户端模
 
 ## 从源码构建
 
-OptiPiston 使用 xmake、LLVM（clang-cl，CI 使用 LLVM 22）和 Git 在 Windows x64 上构建。`--mc` 选择 Minecraft 版本：`26.10`、`26.20`、`26.32`、`26.40` 或 `26.51`。`26.10` 改用 MSVC（Visual Studio 2022）构建，因为 LeviLamina 26.10 自带的 rapidjson 无法在当前 clang 下编译。
+OptiPiston 使用 xmake、LLVM（clang-cl，CI 使用 LLVM 22）和 Git 在 Windows x64 上构建。`--mc` 选择[兼容性](#兼容性)中的版本线：`26.10`、`26.20`、`26.30`、`26.40` 或 `26.50`。`26.10` 改用 MSVC（Visual Studio 2022）构建，因为 LeviLamina 26.10 自带的 rapidjson 无法在当前 clang 下编译。
 
 ```powershell
 xmake f -y -p windows -a x64 -m release --target_type=client --mc=26.20
@@ -149,6 +145,8 @@ xmake run optipiston-tests
 ```
 
 构建产物输出到 `bin/OptiPiston/`。切换 `--mc` 需要重新配置（`xmake f -c ...`），并会覆盖该目录中之前的构建。
+
+模组版本由 `xmake.lua` 中的 `optipiston_version` 加上版本线组成，例如 `0.1.0-mc26.20`。配置时还会按 `--mc` 重写 `tooth.json` 中的版本号和 LeviLamina 版本范围。发布某条版本线时，先按该线配置，提交 `tooth.json`，再打 `v<版本>` 标签。
 
 ## 已知限制
 

@@ -35,17 +35,13 @@ OptiPiston redraws piston arms and the blocks they push on a smooth, configurabl
 > Use a clean LeviLamina client instance when possible. Broad compatibility with other mods is not currently guaranteed.
 
 1. Create or select a LeviLamina client instance for one of the versions in [Compatibility](#compatibility).
-2. Install the matching OptiPiston `#client` release through LeviLauncher/Lip, or run the line for your version from the instance root:
+2. Install the matching OptiPiston `#client` release through LeviLauncher/Lip, or run this from the instance root with your release from [Compatibility](#compatibility) (26.20 shown):
 
    ```powershell
-   lip install github.com/wo55555/OptiPiston@0.1.0-mc26.10#client
    lip install github.com/wo55555/OptiPiston@0.1.0-mc26.20#client
-   lip install github.com/wo55555/OptiPiston@0.1.0-mc26.30#client
-   lip install github.com/wo55555/OptiPiston@0.1.0-mc26.40#client
-   lip install github.com/wo55555/OptiPiston@0.1.0-mc26.50#client
    ```
 
-   Lip does not pick a release from the installed LeviLamina version, so choose the one listed for your instance in [Compatibility](#compatibility).
+   Lip does not pick a release from the installed LeviLamina version, so always specify the one for your instance.
 
 3. Launch the game and open a world. Piston animation is on by default; use `/optipiston status` to check the current state.
 
@@ -139,7 +135,7 @@ Each line has its own release, which only loads on the listed LeviLamina version
 
 ## Build From Source
 
-OptiPiston builds on Windows x64 with xmake, LLVM (clang-cl, CI uses LLVM 22), and Git. `--mc` selects the Minecraft version: `26.10`, `26.20`, `26.32`, `26.40`, or `26.51`. The `26.10` build uses MSVC (Visual Studio 2022) instead, because the rapidjson bundled with LeviLamina 26.10 does not compile under current clang.
+OptiPiston builds on Windows x64 with xmake, LLVM (clang-cl, CI uses LLVM 22), and Git. `--mc` selects the release line from [Compatibility](#compatibility): `26.10`, `26.20`, `26.30`, `26.40`, or `26.50`. The `26.10` build uses MSVC (Visual Studio 2022) instead, because the rapidjson bundled with LeviLamina 26.10 does not compile under current clang.
 
 ```powershell
 xmake f -y -p windows -a x64 -m release --target_type=client --mc=26.20
@@ -149,6 +145,8 @@ xmake run optipiston-tests
 ```
 
 The mod is written to `bin/OptiPiston/`. Switching `--mc` needs a fresh configure (`xmake f -c ...`) and overwrites the previous build there.
+
+The mod version is `optipiston_version` in `xmake.lua` plus the line, for example `0.1.0-mc26.20`. Configuring also rewrites the version and LeviLamina range in `tooth.json` to match `--mc`. To release a line, configure it, commit `tooth.json`, and tag the commit `v<version>`.
 
 ## Known Limitations
 

@@ -9,26 +9,18 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
-    env:
-      OPTIPISTON_VERSION: ${{ github.event.release.tag_name }}
     steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.release.tag_name }}
           fetch-depth: 0
 
-      # The tag's tooth.json pins the LeviLamina line this release builds against.
       - id: target
         shell: pwsh
         run: |
-          $tooth = Get-Content tooth.json -Raw | ConvertFrom-Json
           $tag = "${{ github.event.release.tag_name }}"
-          if ("v$($tooth.version)" -ne $tag) {
-            throw "tooth.json version $($tooth.version) does not match tag $tag"
-          }
-          $range = $tooth.variants[0].dependencies.'github.com/LiteLDev/LeviLamina#client'
-          if ($range -notmatch '^(\d+\.\d+)\.\*$') {
-            throw "Unexpected LeviLamina range: $range"
+          if ($tag -notmatch '^v\d+\.\d+\.\d+-mc(\d+\.\d+)$') {
+            throw "Unexpected release tag: $tag"
           }
           "mc=$($Matches[1])" >> $env:GITHUB_OUTPUT
 
@@ -59,6 +51,16 @@ jobs:
 
       - run: |
           xmake f -a x64 -m release -p windows --target_type=client --mc=${{ steps.target.outputs.mc }} -y
+
+      # Configure regenerates tooth.json; Lip installs from the tag, so it must already match.
+      - shell: pwsh
+        run: |
+          git diff --exit-code -- tooth.json
+          if ($LASTEXITCODE) { throw "tooth.json at the tag does not match --mc; run xmake f --mc=... and commit it" }
+          $version = (Get-Content tooth.json -Raw | ConvertFrom-Json).version
+          if ("v$version" -ne "${{ github.event.release.tag_name }}") {
+            throw "tooth.json version $version does not match the release tag"
+          }
 
       - run: |
           xmake -w -y

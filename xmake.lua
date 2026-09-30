@@ -2,20 +2,22 @@ add_rules("mode.debug", "mode.release")
 
 add_repositories("levimc-repo https://github.com/LiteLDev/xmake-repo.git")
 
--- One DLL per Minecraft version; the value is exposed to the adapter as OPTIPISTON_MC.
-local mc_codes = {
-    ["26.10"] = 2610,
-    ["26.20"] = 2620,
-    ["26.32"] = 2632,
-    ["26.40"] = 2640,
-    ["26.51"] = 2651,
+local optipiston_version = "0.1.0"
+
+-- One DLL per release line; code is exposed to the adapter as OPTIPISTON_MC.
+local mc_lines = {
+    ["26.10"] = {levilamina = "26.10", code = 2610},
+    ["26.20"] = {levilamina = "26.20", code = 2620},
+    ["26.30"] = {levilamina = "26.32", code = 2632},
+    ["26.40"] = {levilamina = "26.40", code = 2640},
+    ["26.50"] = {levilamina = "26.51", code = 2651},
 }
 
 option("mc")
     set_default("26.20")
     set_showmenu(true)
-    set_description("Target Minecraft version")
-    set_values("26.10", "26.20", "26.32", "26.40", "26.51")
+    set_description("Target Minecraft release line")
+    set_values("26.10", "26.20", "26.30", "26.40", "26.50")
 option_end()
 
 -- levibuildscript reads target_type for the prelink target and the manifest platform.
@@ -26,12 +28,14 @@ option("target_type")
 option_end()
 
 local mc_version = get_config("mc") or "26.20"
-local mc_code = mc_codes[mc_version]
-if not mc_code then
+local mc_line = mc_lines[mc_version]
+if not mc_line then
     raise("OptiPiston has no platform adapter for Minecraft " .. mc_version)
 end
+local mod_version = optipiston_version .. "-mc" .. mc_version
+local levilamina_range = mc_line.levilamina .. ".*"
 
-add_requires("levilamina " .. mc_version .. ".*", {configs = {target_type = get_config("target_type")}})
+add_requires("levilamina " .. levilamina_range, {configs = {target_type = get_config("target_type")}})
 add_requires("levibuildscript")
 add_requires("doctest 2.4.12")
 
@@ -39,25 +43,17 @@ if not has_config("vs_runtime") then
     set_runtimes("MD")
 end
 
--- git_tag is resolved in script scope, where try is available.
-local get_version = function(os, git_tag)
-    local version_override     = os.getenv("OPTIPISTON_VERSION")
-    local has_version_override = version_override and version_override:match("%S") ~= nil
-    local tag                  = has_version_override and version_override or git_tag
-    tag                        = (tag or ""):gsub("^%s+", ""):gsub("%s+$", "")
-
-    local major, minor, patch, suffix = tag:match("^v?(%d+)%.(%d+)%.(%d+)(.*)$")
-    if not major then
-        local ci = os.getenv("CI")
-        if has_version_override or ci == "true" or ci == "1" then
-            os.raise("Unable to parse OptiPiston version tag: " .. (tag ~= "" and tag or "<empty>"))
-        end
-        print("Failed to parse version tag, using 0.0.0")
-        return "0.0.0"
+-- Lip reads tooth.json from the release tag, so keep it in sync with --mc.
+local function sync_tooth(io, os, path)
+    local file = path.join(os.projectdir(), "tooth.json")
+    local text = io.readfile(file)
+    local synced = text
+        :gsub('("version"%s*:%s*)"[^"]*"', '%1"' .. mod_version .. '"', 1)
+        :gsub('("github%.com/LiteLDev/LeviLamina#client"%s*:%s*)"[^"]*"', '%1"' .. levilamina_range .. '"', 1)
+    if synced ~= text then
+        io.writefile(file, synced)
+        print("tooth.json updated to " .. mod_version .. " (LeviLamina " .. levilamina_range .. ")")
     end
-
-    if suffix ~= "" then return major .. "." .. minor .. "." .. patch .. suffix end
-    return major .. "." .. minor .. "." .. patch
 end
 
 local function windows_flags()
@@ -105,12 +101,11 @@ target("OptiPiston")
     add_headerfiles("src/mod/**.h", "src/platform/*.h", "include/optipiston/*.h", "include/optipiston/*.hpp")
     add_files("src/mod/**.cpp", "src/platform/bedrock/**.cpp")
     add_includedirs("src", "include")
-    add_defines("OPTIPISTON_MC=" .. mc_code)
+    add_defines("OPTIPISTON_MC=" .. mc_line.code)
     on_load(function (target)
-        -- A repo without commits or tags makes git describe fail.
-        local git_tag = try { function () return os.iorun("git describe --tags --abbrev=0 --always") end }
+        sync_tooth(io, os, path)
         target:add("rules", "@levibuildscript/modpacker", {
-            modVersion = get_version(os, git_tag),
+            modVersion = mod_version,
         })
     end)
     after_build(function (target)

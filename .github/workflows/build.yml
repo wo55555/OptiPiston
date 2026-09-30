@@ -14,9 +14,9 @@ jobs:
         mc:
           - "26.10"
           - "26.20"
-          - "26.32"
+          - "26.30"
           - "26.40"
-          - "26.51"
+          - "26.50"
     steps:
       - uses: actions/checkout@v7
         with:
@@ -46,12 +46,6 @@ jobs:
 
       - run: |
           xmake repo -u
-
-      # Branch builds may have no reachable tag, so take the version from tooth.json.
-      - shell: pwsh
-        run: |
-          $version = (Get-Content tooth.json -Raw | ConvertFrom-Json).version
-          "OPTIPISTON_VERSION=$version" >> $env:GITHUB_ENV
 
       - run: |
           xmake f -a x64 -m release -p windows -v --target_type=client --mc=${{ matrix.mc }} -y

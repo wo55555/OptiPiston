@@ -160,11 +160,19 @@ xmake run optipiston-tests
 
 ### 打包发布
 
-模组版本由 `xmake.lua` 中的 `optipiston_version` 加上版本线组成：`<版本>-mc<版本线>`，例如 `0.1.1-mc26.20`。配置时会按 `--mc` 重写 `tooth.json` 中的版本号和 LeviLamina 版本范围，而 Lip 按标签处的 `tooth.json` 安装，因此每条版本线都从各自的提交发布：
+模组版本由 `xmake.lua` 中的 `optipiston_version` 加上版本线组成：`<版本>-mc<版本线>`，例如 `0.1.1-mc26.20`。配置时会按 `--mc` 重写 `tooth.json` 中的版本号和 LeviLamina 版本范围。Lip 按发布标签处的 `tooth.json` 安装，因此每条版本线的标签都打在一个只修改 `tooth.json` 的独立提交上。这些提交由 **Publish** 工作流生成：
 
-1. 用 `xmake f -c ... --mc=<版本线>` 配置该版本线（例如 `--mc=26.20`）。
-2. 提交重新生成的 `tooth.json`，并给该提交打 `v<版本>-mc<版本线>` 标签（例如 `v0.1.1-mc26.20`）。
-3. 推送标签并为其发布 GitHub Release。发布工作流会检查 `tooth.json` 与标签一致，构建并测试该版本线，然后上传 `OptiPiston-client-windows-x64.zip`。
+1. 修改 `xmake.lua` 中的 `optipiston_version`，在 `CHANGELOG.md` 中添加 `## [<版本>-mc<版本线>]` 章节，并推送到 `main`。
+2. 运行工作流并指定要发布的版本线（默认全部五条）：
+
+   ```powershell
+   gh workflow run publish.yml -f lines="<版本线> <版本线> ..."
+
+   # 示例：只发布 Minecraft 26.20
+   gh workflow run publish.yml -f lines="26.20"
+   ```
+
+3. 工作流为每条版本线打 `v<版本>-mc<版本线>` 标签（例如 `v0.1.1-mc26.20`），检查 `tooth.json` 与标签一致，构建并测试该版本线，然后发布预发布版本，附带 `CHANGELOG.md` 中的说明和 `OptiPiston-client-windows-x64.zip`。
 
 ## 已知限制
 

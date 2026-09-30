@@ -160,11 +160,19 @@ For example, `--mc=26.20` builds the MC 26.20 / LeviLamina 26.20 line. The mod i
 
 ### Packaging a Release
 
-The mod version is `optipiston_version` in `xmake.lua` plus the line: `<version>-mc<line>`, for example `0.1.1-mc26.20`. Configuring rewrites the version and LeviLamina range in `tooth.json` to match `--mc`, and Lip installs from the tagged `tooth.json`, so each line is released from its own commit:
+The mod version is `optipiston_version` in `xmake.lua` plus the line: `<version>-mc<line>`, for example `0.1.1-mc26.20`. Configuring rewrites the version and LeviLamina range in `tooth.json` to match `--mc`. Lip installs from the `tooth.json` at the release tag, so each line is tagged on its own commit that only changes `tooth.json`. The **Publish** workflow creates those commits:
 
-1. Configure the line with `xmake f -c ... --mc=<line>` (for example `--mc=26.20`).
-2. Commit the regenerated `tooth.json` and tag the commit `v<version>-mc<line>` (for example `v0.1.1-mc26.20`).
-3. Push the tag and publish a GitHub release for it. The release workflow checks that `tooth.json` matches the tag, builds and tests the line, and attaches `OptiPiston-client-windows-x64.zip`.
+1. Bump `optipiston_version` in `xmake.lua`, add a `## [<version>-mc<line>]` section to `CHANGELOG.md`, and push to `main`.
+2. Run the workflow with the lines to release (all five by default):
+
+   ```powershell
+   gh workflow run publish.yml -f lines="<line> <line> ..."
+
+   # Example: release only Minecraft 26.20
+   gh workflow run publish.yml -f lines="26.20"
+   ```
+
+3. For each line it tags `v<version>-mc<line>` (for example `v0.1.1-mc26.20`), checks that `tooth.json` matches the tag, builds and tests the line, and publishes a prerelease with its notes from `CHANGELOG.md` and `OptiPiston-client-windows-x64.zip`.
 
 ## Known Limitations
 

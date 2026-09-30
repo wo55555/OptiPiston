@@ -2,9 +2,18 @@ on:
   release:
     types:
       - published
+  # Called by publish.yml; releases created with GITHUB_TOKEN do not trigger `published`.
+  workflow_call:
+    inputs:
+      tag:
+        type: string
+        required: true
 
 permissions:
   contents: read
+
+env:
+  TAG: ${{ inputs.tag || github.event.release.tag_name }}
 
 jobs:
   build:
@@ -12,13 +21,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ env.TAG }}
           fetch-depth: 0
 
       - id: target
         shell: pwsh
         run: |
-          $tag = "${{ github.event.release.tag_name }}"
+          $tag = "${{ env.TAG }}"
           if ($tag -notmatch '^v\d+\.\d+\.\d+-mc(\d+\.\d+)$') {
             throw "Unexpected release tag: $tag"
           }
@@ -58,7 +67,7 @@ jobs:
           git diff --exit-code -- tooth.json
           if ($LASTEXITCODE) { throw "tooth.json at the tag does not match --mc; run xmake f --mc=... and commit it" }
           $version = (Get-Content tooth.json -Raw | ConvertFrom-Json).version
-          if ("v$version" -ne "${{ github.event.release.tag_name }}") {
+          if ("v$version" -ne "${{ env.TAG }}") {
             throw "tooth.json version $version does not match the release tag"
           }
 
@@ -69,44 +78,31 @@ jobs:
           xmake build optipiston-tests
           xmake run optipiston-tests
 
+      # Named by tag: publish.yml builds several lines in one run.
       - uses: actions/upload-artifact@v7
         with:
-          name: ${{ github.event.repository.name }}-${{ github.sha }}-client-windows-x64
+          name: ${{ github.event.repository.name }}-${{ env.TAG }}-client-windows-x64
           path: |
             bin/
 
-  update-release-notes:
+  # Notes and asset go up together so a new release never appears without its zip.
+  upload-to-release:
+    needs:
+      - build
     permissions:
       contents: write
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ env.TAG }}
 
       - id: extract-release-notes
         uses: ffurrer2/extract-release-notes@v3
 
-      - uses: softprops/action-gh-release@v3
-        with:
-          body: |
-            ${{ steps.extract-release-notes.outputs.release_notes }}
-
-  upload-to-release:
-    needs:
-      - build
-      - update-release-notes
-    permissions:
-      contents: write
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ github.event.release.tag_name }}
-
       - uses: actions/download-artifact@v8
         with:
-          name: ${{ github.event.repository.name }}-${{ github.sha }}-client-windows-x64
+          name: ${{ github.event.repository.name }}-${{ env.TAG }}-client-windows-x64
           path: artifact
 
       - run: |
@@ -118,5 +114,9 @@ jobs:
 
       - uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ env.TAG }}
+          prerelease: ${{ inputs.tag && 'true' || github.event.release.prerelease }}
+          body: |
+            ${{ steps.extract-release-notes.outputs.release_notes }}
           files: |
             ${{ github.event.repository.name }}-client-windows-x64.zip

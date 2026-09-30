@@ -1,0 +1,78 @@
+on:
+  workflow_dispatch:
+    inputs:
+      lines:
+        description: Minecraft lines to release, separated by spaces or commas
+        type: string
+        default: 26.10 26.20 26.30 26.40 26.50
+
+permissions:
+  contents: read
+
+jobs:
+  # One tag per line: main plus a commit that only syncs tooth.json, as `xmake f --mc=<line>` would.
+  tag:
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    outputs:
+      tags: ${{ steps.tag.outputs.tags }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - id: tag
+        shell: pwsh
+        env:
+          LINES: ${{ inputs.lines }}
+        run: |
+          $lua = Get-Content xmake.lua -Raw
+          if ($lua -notmatch 'local optipiston_version = "([^"]+)"') { throw "optipiston_version not found in xmake.lua" }
+          $version = $Matches[1]
+          if ((Get-Content CHANGELOG.md -Raw) -notmatch "(?m)^## \[$([regex]::Escape($version))-mc") {
+            throw "CHANGELOG.md has no section for $version"
+          }
+
+          $lines = @($env:LINES -split '[\s,]+' | Where-Object { $_ })
+          if (-not $lines) { throw "No lines given" }
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          $base = git rev-parse HEAD
+          $tags = @()
+          foreach ($line in $lines) {
+            $m = [regex]::Match($lua, '\["' + [regex]::Escape($line) + '"\]\s*=\s*\{\s*levilamina\s*=\s*"([^"]+)"')
+            if (-not $m.Success) { throw "Unknown Minecraft line: $line" }
+            $range = "$($m.Groups[1].Value).*"
+            $tag = "v$version-mc$line"
+            if (git ls-remote --tags origin "refs/tags/$tag") { throw "Tag $tag already exists" }
+
+            git checkout -q --detach $base
+            $tooth = Get-Content tooth.json -Raw
+            $tooth = ([regex]'("version"\s*:\s*)"[^"]*"').Replace($tooth, "`${1}`"$version-mc$line`"", 1)
+            $tooth = ([regex]'("github\.com/LiteLDev/LeviLamina#client"\s*:\s*)"[^"]*"').Replace($tooth, "`${1}`"$range`"", 1)
+            Set-Content tooth.json $tooth -NoNewline
+            git diff --quiet -- tooth.json
+            if ($LASTEXITCODE) { git commit -q -m "chore(release): $tag" -- tooth.json }
+            git tag $tag
+            $tags += $tag
+            "$tag -> $(git rev-parse --short HEAD) (LeviLamina $range)"
+          }
+
+          git push --atomic origin ($tags | ForEach-Object { "refs/tags/$_" })
+          if ($LASTEXITCODE) { throw "Pushing tags failed" }
+          "tags=$(ConvertTo-Json -Compress -InputObject $tags)" >> $env:GITHUB_OUTPUT
+
+  release:
+    needs: tag
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        tag: ${{ fromJSON(needs.tag.outputs.tags) }}
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ matrix.tag }}

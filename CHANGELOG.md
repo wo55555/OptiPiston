@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2-mc26.20] - 2026-09-30
+
+> Bug-fix prerelease, published separately for each Minecraft line (26.10, 26.20, 26.30, 26.40, 26.50); these notes apply to all of them. Update by installing the release for your line; the configuration format and C API v1 are unchanged. These fixes build and pass unit tests on every line but have not yet been tested in game.
+
+### Fixed
+
+- Fixed a crash, seen in multiplayer, when a pushed block was destroyed while its animation was still held.
+- Fixed pushed chests and other blocks with block entities (such as trapped chests, shulker boxes, spawners, lecterns, enchanting tables, bells and decorated pots) appearing at their destination before the slide finished.
+
 ## [0.1.1-mc26.20] - 2026-09-30
 
 > Performance prerelease, published separately for each Minecraft line (26.10, 26.20, 26.30, 26.40, 26.50); these notes apply to all of them. Update by installing the release for your line; the configuration format and C API v1 are unchanged. These changes are covered by unit tests and builds on every line but have not yet been tested in game.
@@ -31,6 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Singleplayer world speed with optional audio and particle scaling.
 - `/optipiston` client command and a C API for Playback's replay clock.
 
-[Unreleased]: https://github.com/wo55555/OptiPiston/compare/v0.1.1-mc26.20...HEAD
+[Unreleased]: https://github.com/wo55555/OptiPiston/compare/v0.1.2-mc26.20...HEAD
+[0.1.2-mc26.20]: https://github.com/wo55555/OptiPiston/compare/v0.1.1-mc26.20...v0.1.2-mc26.20
 [0.1.1-mc26.20]: https://github.com/wo55555/OptiPiston/compare/v0.1.0-mc26.20...v0.1.1-mc26.20
 [0.1.0-mc26.20]: https://github.com/wo55555/OptiPiston/releases/tag/v0.1.0-mc26.20

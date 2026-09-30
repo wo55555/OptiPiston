@@ -5,7 +5,7 @@
   <p>面向 Windows LeviLamina 的 Minecraft 基岩版纯客户端模组，提供平滑活塞动画和单人世界变速。</p>
 
   <p>
-    <img src="https://img.shields.io/badge/version-v0.1.0-4c8bf5?style=flat-square" alt="OptiPiston v0.1.0">
+    <img src="https://img.shields.io/badge/version-v0.1.1-4c8bf5?style=flat-square" alt="OptiPiston v0.1.1">
     <img src="https://img.shields.io/badge/Minecraft%20Bedrock-Windows%20x64-62b47a?style=flat-square" alt="Windows x64 Minecraft 基岩版">
     <img src="https://img.shields.io/badge/LeviLamina-26.10%E2%80%9326.51-7b68ee?style=flat-square" alt="LeviLamina 26.10 至 26.51">
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue?style=flat-square" alt="AGPL-3.0 许可证"></a>
@@ -34,18 +34,30 @@ OptiPiston 按可配置的平滑时间线重新绘制活塞臂及其推动的方
 > [!IMPORTANT]
 > 建议尽量使用干净的 LeviLamina 客户端实例；目前不保证与其他模组广泛兼容。
 
-1. 创建或选择[兼容性](#兼容性)中所列版本的 LeviLamina 客户端实例。
-2. 通过 LeviLauncher/Lip 安装对应版本的 OptiPiston `#client` 发行版，或在实例根目录运行下面的命令，并换成[兼容性](#兼容性)中对应的发行版（示例为 26.20）：
+### 使用 LeviLauncher 安装（推荐）
 
-   ```powershell
-   lip install github.com/wo55555/OptiPiston@0.1.0-mc26.20#client
-   ```
+1. 在 LeviLauncher 左侧边栏选择 **Download（下载）**，找到[兼容性](#兼容性)中所列的 Minecraft 版本，创建使用 **LeviLamina** 加载器的实例。
+2. 选择 **Launch（启动）**，选中该实例，然后在**内容下载**区域选择 **lip**。
+3. 搜索 **OptiPiston**，打开由 `wo55555` 发布的软件包。
+4. 选择 **LL 依赖**和**游戏版本**与实例一致的发行版本，点击该行的**安装**。Lip 不会根据已安装的 LeviLamina 版本自动选择发行版。
+5. 启动游戏并进入世界。活塞动画默认开启，可用 `/optipiston status` 查看当前状态。
 
-   Lip 不会根据已安装的 LeviLamina 版本自动选择发行版，请始终指定与实例对应的版本。
+### 使用 Lip 命令行安装
 
-3. 启动游戏并进入世界。活塞动画默认开启，可用 `/optipiston status` 查看当前状态。
+在实例根目录运行下面的命令，`<version>` 和 `<line>` 取自[兼容性](#兼容性)中与实例对应的发行版：
 
-手动安装：从对应的发行版本下载 `OptiPiston-client-windows-x64.zip`，将其中的 `OptiPiston` 目录解压到实例的 `mods` 目录，然后重启客户端。
+```powershell
+lip install github.com/wo55555/OptiPiston@<version>-mc<line>#client
+
+# 示例：Minecraft 26.20 / LeviLamina 26.20.*
+lip install github.com/wo55555/OptiPiston@0.1.1-mc26.20#client
+```
+
+必须带上 `#client` 变体。
+
+### 手动安装
+
+从对应的发行版本下载 `OptiPiston-client-windows-x64.zip`，将其中的 `OptiPiston` 目录解压到实例的 `mods` 目录，然后重启客户端。
 
 ## 功能
 
@@ -123,30 +135,36 @@ API v1 还可以读写活塞动画开关和时长；设置值会限制在支持�
 
 ## 兼容性
 
-| Minecraft 版本线 | LeviLamina | 发行版                                                                                | 状态                 |
-| ---------------- | ---------- | ------------------------------------------------------------------------------------- | -------------------- |
-| 26.10            | `26.10.*`  | [`v0.1.0-mc26.10`](https://github.com/wo55555/OptiPiston/releases/tag/v0.1.0-mc26.10) | 预发布，尚未实机测试 |
-| 26.20            | `26.20.*`  | [`v0.1.0-mc26.20`](https://github.com/wo55555/OptiPiston/releases/tag/v0.1.0-mc26.20) | 预发布，已实机测试   |
-| 26.30            | `26.32.*`  | [`v0.1.0-mc26.30`](https://github.com/wo55555/OptiPiston/releases/tag/v0.1.0-mc26.30) | 预发布，尚未实机测试 |
-| 26.40            | `26.40.*`  | [`v0.1.0-mc26.40`](https://github.com/wo55555/OptiPiston/releases/tag/v0.1.0-mc26.40) | 预发布，尚未实机测试 |
-| 26.50            | `26.51.*`  | [`v0.1.0-mc26.50`](https://github.com/wo55555/OptiPiston/releases/tag/v0.1.0-mc26.50) | 预发布，尚未实机测试 |
+| Minecraft 版本线 | LeviLamina | 发行版                                                                                | 状态                          |
+| ---------------- | ---------- | ------------------------------------------------------------------------------------- | ----------------------------- |
+| 26.10            | `26.10.*`  | [`v0.1.1-mc26.10`](https://github.com/wo55555/OptiPiston/releases/tag/v0.1.1-mc26.10) | 预发布，尚未实机测试          |
+| 26.20            | `26.20.*`  | [`v0.1.1-mc26.20`](https://github.com/wo55555/OptiPiston/releases/tag/v0.1.1-mc26.20) | 预发布，已在 `0.1.0` 实机测试 |
+| 26.30            | `26.32.*`  | [`v0.1.1-mc26.30`](https://github.com/wo55555/OptiPiston/releases/tag/v0.1.1-mc26.30) | 预发布，尚未实机测试          |
+| 26.40            | `26.40.*`  | [`v0.1.1-mc26.40`](https://github.com/wo55555/OptiPiston/releases/tag/v0.1.1-mc26.40) | 预发布，尚未实机测试          |
+| 26.50            | `26.51.*`  | [`v0.1.1-mc26.50`](https://github.com/wo55555/OptiPiston/releases/tag/v0.1.1-mc26.50) | 预发布，尚未实机测试          |
 
-OptiPiston 面向 Windows x64 平台的 Minecraft 基岩版，以纯客户端模组形式发布。每条版本线单独发布，只能在所列 LeviLamina 版本上加载。目前已发布的都是预发布版本。
+OptiPiston 面向 Windows x64 平台的 Minecraft 基岩版，以纯客户端模组形式发布。每条版本线单独发布，标签格式为 `v<版本>-mc<版本线>`（例如 `v0.1.1-mc26.20`），只能在所列 LeviLamina 版本上加载。目前已发布的都是预发布版本。
 
 ## 从源码构建
 
 OptiPiston 使用 xmake、LLVM（clang-cl，CI 使用 LLVM 22）和 Git 在 Windows x64 上构建。`--mc` 选择[兼容性](#兼容性)中的版本线：`26.10`、`26.20`、`26.30`、`26.40` 或 `26.50`。`26.10` 改用 MSVC（Visual Studio 2022）构建，因为 LeviLamina 26.10 自带的 rapidjson 无法在当前 clang 下编译。
 
 ```powershell
-xmake f -y -p windows -a x64 -m release --target_type=client --mc=26.20
+xmake f -c -y -p windows -a x64 -m release --target_type=client --mc=<版本线>
 xmake -y
 xmake build optipiston-tests
 xmake run optipiston-tests
 ```
 
-构建产物输出到 `bin/OptiPiston/`。切换 `--mc` 需要重新配置（`xmake f -c ...`），并会覆盖该目录中之前的构建。
+例如 `--mc=26.20` 构建 MC 26.20 / LeviLamina 26.20 版本线。构建产物输出到 `bin/OptiPiston/`；切换 `--mc` 需要重新配置（`-c`），并会覆盖该目录中之前的构建。
 
-模组版本由 `xmake.lua` 中的 `optipiston_version` 加上版本线组成，例如 `0.1.0-mc26.20`。配置时还会按 `--mc` 重写 `tooth.json` 中的版本号和 LeviLamina 版本范围。发布某条版本线时，先按该线配置，提交 `tooth.json`，再打 `v<版本>` 标签。
+### 打包发布
+
+模组版本由 `xmake.lua` 中的 `optipiston_version` 加上版本线组成：`<版本>-mc<版本线>`，例如 `0.1.1-mc26.20`。配置时会按 `--mc` 重写 `tooth.json` 中的版本号和 LeviLamina 版本范围，而 Lip 按标签处的 `tooth.json` 安装，因此每条版本线都从各自的提交发布：
+
+1. 用 `xmake f -c ... --mc=<版本线>` 配置该版本线（例如 `--mc=26.20`）。
+2. 提交重新生成的 `tooth.json`，并给该提交打 `v<版本>-mc<版本线>` 标签（例如 `v0.1.1-mc26.20`）。
+3. 推送标签并为其发布 GitHub Release。发布工作流会检查 `tooth.json` 与标签一致，构建并测试该版本线，然后上传 `OptiPiston-client-windows-x64.zip`。
 
 ## 已知限制
 

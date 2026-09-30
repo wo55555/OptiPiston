@@ -264,7 +264,8 @@ struct MovingEntry {
     // Its cell is re-meshed with the real block, so drawing it again would double it.
     bool                       released{};
     std::optional<CarryVisual> carry;
-    // The chunk may destroy a detached instance before its cell is re-meshed.
+    // The chunk may destroy a detached instance before its cell is re-meshed. The key is only safe to dereference
+    // through this: the dtor hook does not see every destruction.
     std::shared_ptr<::BlockActor> keep;
     // Read while the instance was being drawn, so later checks need not touch it.
     bool carriesActor{};
@@ -631,7 +632,12 @@ std::shared_ptr<::BlockActor> findOwner(::BlockSource& region, ::MovingBlockActo
 
 void registerMoving(::MovingBlockActor const& moving, ::BlockSource& region) {
     std::lock_guard const guard(gAnimMutex);
-    if (gMovingAction.contains(&moving)) return;
+    if (auto const known = gMovingAction.find(&moving); known != gMovingAction.end()) {
+        // The chunk lock is only tried, so a missed owner is retried while the instance is known to be alive.
+        auto& entry = known->second;
+        if (!entry.keep && !entry.handedOff && !entry.released) entry.keep = findOwner(region, moving);
+        return;
+    }
     auto const it = gPistonVisuals.find(moving.mPistonBlockPos.get());
     if (it == gPistonVisuals.end()) return;
     auto const visual = gActionVisuals.find(it->second.action);
@@ -854,12 +860,13 @@ void requeueHeldMoving(::LevelRendererCamera& camera) {
         std::lock_guard const    guard(gAnimMutex);
         std::vector<QueuedItem*> held;
         for (auto& [moving, entry] : gMovingAction) {
-            auto* actor = static_cast<::BlockActor*>(const_cast<::MovingBlockActor*>(moving));
             if (!heldLocked(entry)) {
                 if (entry.keep) drop.push_back(std::move(entry.keep));
                 continue;
             }
-            if (auto* const item = queuedItemOf(actor)) held.push_back(item);
+            // An unkept key may already be freed; queueing it would also hand the camera a dangling pointer.
+            if (!entry.keep) continue;
+            if (auto* const item = queuedItemOf(entry.keep.get())) held.push_back(item);
         }
         queueMissing(camera, held);
         drop.insert(drop.end(), std::make_move_iterator(gDropKeep.begin()), std::make_move_iterator(gDropKeep.end()));

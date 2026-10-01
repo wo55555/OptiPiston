@@ -5,7 +5,7 @@
   <p>A client-only LeviLamina mod for Minecraft Bedrock on Windows that smooths piston animation and adds singleplayer world speed control.</p>
 
   <p>
-    <img src="https://img.shields.io/badge/version-v0.1.2-4c8bf5?style=flat-square" alt="OptiPiston v0.1.2">
+    <img src="https://img.shields.io/badge/version-v0.1.3-4c8bf5?style=flat-square" alt="OptiPiston v0.1.3">
     <img src="https://img.shields.io/badge/Minecraft%20Bedrock-Windows%20x64-62b47a?style=flat-square" alt="Minecraft Bedrock for Windows x64">
     <img src="https://img.shields.io/badge/LeviLamina-26.10%E2%80%9326.51-7b68ee?style=flat-square" alt="LeviLamina 26.10 to 26.51">
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue?style=flat-square" alt="AGPL-3.0 license"></a>
@@ -39,25 +39,25 @@ OptiPiston redraws piston arms and the blocks they push on a smooth, configurabl
 1. In LeviLauncher, select **Download**, find a Minecraft version listed in [Compatibility](#compatibility), and install it as an instance with the **LeviLamina** loader.
 2. Select **Launch**, choose that instance, then select **lip** under **Content Download**.
 3. Search for **OptiPiston** and open the package published by `wo55555`.
-4. Choose the release whose **LL Requirement** and **Game Versions** match your instance, then select **Install** in that row. Lip does not pick a release from the installed LeviLamina version.
+4. Choose the latest version and the variant for your instance's Minecraft line from [Compatibility](#compatibility) (for example `mc26_20`), then select **Install**. Lip does not pick a variant from the installed LeviLamina version.
 5. Launch the game and open a world. Piston animation is on by default; use `/optipiston status` to check the current state.
 
 ### Install with the Lip CLI
 
-Run this from the instance root, with `<version>` and `<line>` taken from the release for your instance in [Compatibility](#compatibility):
+Run this from the instance root, with `<variant>` taken from your instance's Minecraft line in [Compatibility](#compatibility):
 
 ```powershell
-lip install github.com/wo55555/OptiPiston@<version>-mc<line>#client
+lip install github.com/wo55555/OptiPiston#<variant>@<version>
 
 # Example: Minecraft 26.20 / LeviLamina 26.20.*
-lip install github.com/wo55555/OptiPiston@0.1.2-mc26.20#client
+lip install github.com/wo55555/OptiPiston#mc26_20@0.1.3
 ```
 
-The `#client` variant is required.
+The variant is required. Installs from `0.1.2` or earlier used `#client`; uninstall that first with `lip uninstall github.com/wo55555/OptiPiston#client`, then install the new variant.
 
 ### Manual Installation
 
-Download `OptiPiston-client-windows-x64.zip` from the matching release, extract its `OptiPiston` directory into the instance's `mods` directory, and restart the client.
+Download `OptiPiston-mc<line>-windows-x64.zip` for your line (for example `OptiPiston-mc26.20-windows-x64.zip`) from the latest release, extract its `OptiPiston` directory into the instance's `mods` directory, and restart the client.
 
 ## Features
 
@@ -135,15 +135,15 @@ API v1 also reads and writes the piston toggle and duration. Setters clamp to th
 
 ## Compatibility
 
-| Minecraft line | LeviLamina | Release                                                                               | Status                                |
-| -------------- | ---------- | ------------------------------------------------------------------------------------- | ------------------------------------- |
-| 26.10          | `26.10.*`  | [`v0.1.2-mc26.10`](https://github.com/wo55555/OptiPiston/releases/tag/v0.1.2-mc26.10) | Prerelease; not yet tested in game    |
-| 26.20          | `26.20.*`  | [`v0.1.2-mc26.20`](https://github.com/wo55555/OptiPiston/releases/tag/v0.1.2-mc26.20) | Prerelease; tested in game on `0.1.0` |
-| 26.30          | `26.32.*`  | [`v0.1.2-mc26.30`](https://github.com/wo55555/OptiPiston/releases/tag/v0.1.2-mc26.30) | Prerelease; not yet tested in game    |
-| 26.40          | `26.40.*`  | [`v0.1.2-mc26.40`](https://github.com/wo55555/OptiPiston/releases/tag/v0.1.2-mc26.40) | Prerelease; not yet tested in game    |
-| 26.50          | `26.51.*`  | [`v0.1.2-mc26.50`](https://github.com/wo55555/OptiPiston/releases/tag/v0.1.2-mc26.50) | Prerelease; not yet tested in game    |
+| Minecraft line | LeviLamina | Lip variant | Status                                |
+| -------------- | ---------- | ----------- | ------------------------------------- |
+| 26.10          | `26.10.*`  | `mc26_10`   | Prerelease; not yet tested in game    |
+| 26.20          | `26.20.*`  | `mc26_20`   | Prerelease; tested in game on `0.1.0` |
+| 26.30          | `26.32.*`  | `mc26_30`   | Prerelease; not yet tested in game    |
+| 26.40          | `26.40.*`  | `mc26_40`   | Prerelease; not yet tested in game    |
+| 26.50          | `26.51.*`  | `mc26_50`   | Prerelease; not yet tested in game    |
 
-Each line has its own release, tagged `v<version>-mc<line>` (for example `v0.1.2-mc26.20`), which only loads on the listed LeviLamina version. All currently published releases are prereleases. OptiPiston targets Minecraft Bedrock for Windows x64 and is distributed as a client-only mod.
+Every line ships in the same release, [`v0.1.3`](https://github.com/wo55555/OptiPiston/releases/tag/v0.1.3), as its own asset `OptiPiston-mc<line>-windows-x64.zip`; each build only loads on the listed LeviLamina version. All currently published releases are prereleases. OptiPiston targets Minecraft Bedrock for Windows x64 and is distributed as a client-only mod.
 
 ## Build From Source
 
@@ -160,19 +160,16 @@ For example, `--mc=26.20` builds the MC 26.20 / LeviLamina 26.20 line. The mod i
 
 ### Packaging a Release
 
-The mod version is `optipiston_version` in `xmake.lua` plus the line: `<version>-mc<line>`, for example `0.1.2-mc26.20`. Configuring rewrites the version and LeviLamina range in `tooth.json` to match `--mc`. Lip installs from the `tooth.json` at the release tag, so each line is tagged on its own commit that only changes `tooth.json`. The **Publish** workflow creates those commits:
+The package version is `optipiston_version` in `xmake.lua`; the mod manifest adds the line, for example `0.1.3-mc26.20`. `tooth.json` has one variant per line. Configuring syncs its version and fails if any variant's LeviLamina range or asset name does not match `xmake.lua`. Lip installs from the `tooth.json` at the release tag, so commit it before publishing. The **Publish** workflow releases every line under one tag:
 
-1. Bump `optipiston_version` in `xmake.lua`, add a `## [<version>-mc<line>]` section to `CHANGELOG.md`, and push to `main`.
-2. Run the workflow with the lines to release (all five by default):
+1. Bump `optipiston_version` in `xmake.lua`, run `xmake f` to sync `tooth.json`, add a `## [<version>]` section to `CHANGELOG.md`, and push to `main`.
+2. Run the workflow:
 
    ```powershell
-   gh workflow run publish.yml -f lines="<line> <line> ..."
-
-   # Example: release only Minecraft 26.20
-   gh workflow run publish.yml -f lines="26.20"
+   gh workflow run publish.yml
    ```
 
-3. For each line it tags `v<version>-mc<line>` (for example `v0.1.2-mc26.20`), checks that `tooth.json` matches the tag, builds and tests the line, and publishes a prerelease with its notes from `CHANGELOG.md` and `OptiPiston-client-windows-x64.zip`.
+3. It tags `main` as `v<version>` (for example `v0.1.3`), builds and tests every line in `tooth.json`, and publishes one prerelease with its notes from `CHANGELOG.md` and an `OptiPiston-mc<line>-windows-x64.zip` per line. Nothing is published unless every line builds.
 
 ## Known Limitations
 

@@ -2,7 +2,7 @@ add_rules("mode.debug", "mode.release")
 
 add_repositories("levimc-repo https://github.com/LiteLDev/xmake-repo.git")
 
-local optipiston_version = "0.1.2"
+local optipiston_version = "0.1.3"
 
 -- One DLL per release line; code is exposed to the adapter as OPTIPISTON_MC.
 local mc_lines = {
@@ -43,16 +43,28 @@ if not has_config("vs_runtime") then
     set_runtimes("MD")
 end
 
--- Lip reads tooth.json from the release tag, so keep it in sync with --mc.
-local function sync_tooth(io, os, path)
+-- Lip reads tooth.json from the release tag: one release carries every line, one variant each.
+-- Lip labels cannot contain dots, so line 26.20 is variant `mc26_20`.
+local function sync_tooth(io, os, path, json)
     local file = path.join(os.projectdir(), "tooth.json")
     local text = io.readfile(file)
-    local synced = text
-        :gsub('("version"%s*:%s*)"[^"]*"', '%1"' .. mod_version .. '"', 1)
-        :gsub('("github%.com/LiteLDev/LeviLamina#client"%s*:%s*)"[^"]*"', '%1"' .. levilamina_range .. '"', 1)
+    local synced = text:gsub('("version"%s*:%s*)"[^"]*"', '%1"' .. optipiston_version .. '"', 1)
     if synced ~= text then
         io.writefile(file, synced)
-        print("tooth.json updated to " .. mod_version .. " (LeviLamina " .. levilamina_range .. ")")
+        print("tooth.json updated to " .. optipiston_version)
+    end
+    local variants = {}
+    for _, variant in ipairs(json.decode(synced).variants or {}) do
+        variants[variant.label] = variant
+    end
+    for name, line in pairs(mc_lines) do
+        local label = "mc" .. name:gsub("%.", "_")
+        local variant = variants[label]
+        local range = variant and variant.dependencies["github.com/LiteLDev/LeviLamina#client"]
+        local url = variant and variant.assets[1].urls[1] or ""
+        if range ~= line.levilamina .. ".*" or not url:find("/OptiPiston-mc" .. name .. "-windows-x64.zip", 1, true) then
+            os.raise("tooth.json variant " .. label .. " must depend on LeviLamina " .. line.levilamina .. ".* and download OptiPiston-mc" .. name .. "-windows-x64.zip")
+        end
     end
 end
 
@@ -103,7 +115,7 @@ target("OptiPiston")
     add_includedirs("src", "include")
     add_defines("OPTIPISTON_MC=" .. mc_line.code)
     on_load(function (target)
-        sync_tooth(io, os, path)
+        sync_tooth(io, os, path, import("core.base.json"))
         target:add("rules", "@levibuildscript/modpacker", {
             modVersion = mod_version,
         })

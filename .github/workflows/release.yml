@@ -16,27 +16,49 @@ env:
   TAG: ${{ inputs.tag || github.event.release.tag_name }}
 
 jobs:
+  # Every line in tooth.json is built and published under the one tag.
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      lines: ${{ steps.plan.outputs.lines }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+
+      - id: plan
+        shell: pwsh
+        run: |
+          $tag = "${{ env.TAG }}"
+          if ($tag -notmatch '^v(\d+\.\d+\.\d+)$') { throw "Unexpected release tag: $tag" }
+          $tooth = Get-Content tooth.json -Raw | ConvertFrom-Json
+          if ($tooth.version -ne $Matches[1]) { throw "tooth.json version $($tooth.version) does not match the release tag" }
+          # Lip labels cannot contain dots: variant mc26_20 is line 26.20.
+          $lines = @($tooth.variants | ForEach-Object {
+            if ($_.label -notmatch '^mc(\d+)_(\d+)$') { throw "Unexpected variant label: $($_.label)" }
+            "$($Matches[1]).$($Matches[2])"
+          })
+          if (-not $lines) { throw "tooth.json has no variants" }
+          "lines=$(ConvertTo-Json -Compress -InputObject $lines)" >> $env:GITHUB_OUTPUT
+
   build:
+    needs:
+      - plan
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        mc: ${{ fromJSON(needs.plan.outputs.lines) }}
     steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ env.TAG }}
           fetch-depth: 0
 
-      - id: target
-        shell: pwsh
-        run: |
-          $tag = "${{ env.TAG }}"
-          if ($tag -notmatch '^v\d+\.\d+\.\d+-mc(\d+\.\d+)$') {
-            throw "Unexpected release tag: $tag"
-          }
-          "mc=$($Matches[1])" >> $env:GITHUB_OUTPUT
-
       - uses: xmake-io/github-action-setup-xmake@v1
 
       # 26.10's precompiled libcurl links a zlib version that is not installed.
-      - if: steps.target.outputs.mc == '26.10'
+      - if: matrix.mc == '26.10'
         run: |
           xmake global --policies=package.precompiled:n
 
@@ -44,13 +66,13 @@ jobs:
         with:
           path: |
             ~/AppData/Local/.xmake
-          key: xmake-${{ steps.target.outputs.mc }}-${{ hashFiles('xmake.lua') }}
+          key: xmake-${{ matrix.mc }}-${{ hashFiles('xmake.lua') }}
           restore-keys: |
-            xmake-${{ steps.target.outputs.mc }}-
+            xmake-${{ matrix.mc }}-
 
       # 26.10 builds with MSVC (selected in xmake.lua); the others use clang-cl.
       - name: Setup LLVM
-        if: steps.target.outputs.mc != '26.10'
+        if: matrix.mc != '26.10'
         uses: ZhongRuoyu/setup-llvm@v0
         with:
           llvm-version: 22
@@ -58,18 +80,15 @@ jobs:
       - run: |
           xmake repo -u
 
+      # Configure checks every tooth.json variant against xmake.lua and syncs the version.
       - run: |
-          xmake f -a x64 -m release -p windows --target_type=client --mc=${{ steps.target.outputs.mc }} -y
+          xmake f -a x64 -m release -p windows --target_type=client --mc=${{ matrix.mc }} -y
 
-      # Configure regenerates tooth.json; Lip installs from the tag, so it must already match.
+      # Lip installs from the tag, so tooth.json must already be in sync there.
       - shell: pwsh
         run: |
           git diff --exit-code -- tooth.json
-          if ($LASTEXITCODE) { throw "tooth.json at the tag does not match --mc; run xmake f --mc=... and commit it" }
-          $version = (Get-Content tooth.json -Raw | ConvertFrom-Json).version
-          if ("v$version" -ne "${{ env.TAG }}") {
-            throw "tooth.json version $version does not match the release tag"
-          }
+          if ($LASTEXITCODE) { throw "tooth.json at the tag is out of sync with xmake.lua; run xmake f and commit it" }
 
       - run: |
           xmake -w -y
@@ -78,16 +97,16 @@ jobs:
           xmake build optipiston-tests
           xmake run optipiston-tests
 
-      # Named by tag: publish.yml builds several lines in one run.
       - uses: actions/upload-artifact@v7
         with:
-          name: ${{ github.event.repository.name }}-${{ env.TAG }}-client-windows-x64
+          name: ${{ github.event.repository.name }}-${{ env.TAG }}-mc${{ matrix.mc }}-windows-x64
           path: |
             bin/
 
-  # Notes and asset go up together so a new release never appears without its zip.
+  # Notes and every line's zip go up together, and only once all lines built.
   upload-to-release:
     needs:
+      - plan
       - build
     permissions:
       contents: write
@@ -102,15 +121,22 @@ jobs:
 
       - uses: actions/download-artifact@v8
         with:
-          name: ${{ github.event.repository.name }}-${{ env.TAG }}-client-windows-x64
-          path: artifact
+          pattern: ${{ github.event.repository.name }}-${{ env.TAG }}-mc*-windows-x64
+          path: artifacts
 
-      - run: |
-          cp CHANGELOG.md LICENSE README.md README_ZH.md artifact/
-
-      - run: |
-          zip -r ../${{ github.event.repository.name }}-client-windows-x64.zip *
-        working-directory: artifact
+      # Asset names must match the variant URLs in tooth.json.
+      - env:
+          LINES: ${{ needs.plan.outputs.lines }}
+          PREFIX: ${{ github.event.repository.name }}-${{ env.TAG }}-mc
+          NAME: ${{ github.event.repository.name }}
+        run: |
+          set -euo pipefail
+          for line in $(jq -r '.[]' <<< "$LINES"); do
+            dir="artifacts/${PREFIX}${line}-windows-x64"
+            cp CHANGELOG.md LICENSE README.md README_ZH.md "$dir/"
+            (cd "$dir" && zip -r "../../${NAME}-mc${line}-windows-x64.zip" *)
+          done
+          ls -l ${NAME}-mc*-windows-x64.zip
 
       - uses: softprops/action-gh-release@v3
         with:
@@ -119,4 +145,4 @@ jobs:
           body: |
             ${{ steps.extract-release-notes.outputs.release_notes }}
           files: |
-            ${{ github.event.repository.name }}-client-windows-x64.zip
+            ${{ github.event.repository.name }}-mc*-windows-x64.zip

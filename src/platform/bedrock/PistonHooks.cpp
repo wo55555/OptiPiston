@@ -70,12 +70,14 @@
 #include <algorithm>
 #include <atomic>
 #include <bitset>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -616,13 +618,18 @@ std::optional<::Vec3> landedBodyOffset(::BlockPos const& pistonPos, float alpha)
     return offset;
 }
 
-// Caller holds gAnimMutex; the dtor hook takes it under the chunk lock, so the chunk lock is only tried.
-std::shared_ptr<::BlockActor> findOwner(::BlockSource& region, ::MovingBlockActor const& moving) {
-    auto* const chunk = region.getChunkAt(moving.mPosition.get());
+// Only compares addresses, so `actor` may already be freed. The dtor hook takes gAnimMutex under the chunk lock:
+// callers holding gAnimMutex must not wait. The wait is bounded because the calling thread may hold the lock.
+std::shared_ptr<::BlockActor>
+findOwner(::BlockSource& region, ::BlockPos const& cell, ::BlockActor const* actor, bool wait) {
+    auto* const chunk = region.getChunkAt(cell);
     if (chunk == nullptr) return {};
-    std::unique_lock<std::mutex> const lock(chunk->mBlockEntityAccessLock.get(), std::try_to_lock);
-    if (!lock.owns_lock()) return {};
-    auto const* const actor = static_cast<::BlockActor const*>(&moving);
+    std::unique_lock<std::mutex> lock(chunk->mBlockEntityAccessLock.get(), std::defer_lock);
+    auto const                   deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2);
+    while (!lock.try_lock()) {
+        if (!wait || std::chrono::steady_clock::now() >= deadline) return {};
+        std::this_thread::yield();
+    }
     for (auto const& [pos, owned] : chunk->mBlockEntities.get().mMap.get())
         if (owned.get() == actor) return owned;
     for (auto const& owned : chunk->mPreservedBlockEntities.get())
@@ -632,10 +639,11 @@ std::shared_ptr<::BlockActor> findOwner(::BlockSource& region, ::MovingBlockActo
 
 void registerMoving(::MovingBlockActor const& moving, ::BlockSource& region) {
     std::lock_guard const guard(gAnimMutex);
+    auto const* const     self = static_cast<::BlockActor const*>(&moving);
     if (auto const known = gMovingAction.find(&moving); known != gMovingAction.end()) {
         // The chunk lock is only tried, so a missed owner is retried while the instance is known to be alive.
         auto& entry = known->second;
-        if (!entry.keep && !entry.handedOff && !entry.released) entry.keep = findOwner(region, moving);
+        if (!entry.keep && !entry.handedOff && !entry.released) entry.keep = findOwner(region, entry.cell, self, false);
         return;
     }
     auto const it = gPistonVisuals.find(moving.mPistonBlockPos.get());
@@ -662,7 +670,7 @@ void registerMoving(::MovingBlockActor const& moving, ::BlockSource& region) {
             updateMeshWatchLocked();
         }
     }
-    entry.keep = findOwner(region, moving);
+    entry.keep = findOwner(region, cell, self, false);
     {
         std::shared_ptr<::BlockActor> const& copy = moving.mWrappedBlockActor;
         entry.carriesActor                        = copy != nullptr;
@@ -852,9 +860,34 @@ void queueFreshMoving(::LevelRendererCamera& camera) {
     queueMissing(camera, items);
 }
 
+// A held block the camera no longer collects is only drawn through its kept owner, so an owner missed at
+// registration is looked up again here, outside gAnimMutex, where the chunk lock may be waited for.
+void retryHeldOwners() {
+    std::vector<std::pair<::MovingBlockActor const*, ::BlockPos>> missing;
+    {
+        std::lock_guard const guard(gAnimMutex);
+        for (auto const& [moving, entry] : gMovingAction)
+            if (!entry.keep && heldLocked(entry)) missing.emplace_back(moving, entry.cell);
+    }
+    if (missing.empty()) return;
+    auto  client = ll::service::getClientInstance();
+    auto* player = client ? client->getLocalPlayer() : nullptr;
+    if (!player) return;
+    auto& region = player->getDimensionBlockSource();
+    for (auto const& [moving, cell] : missing) {
+        // Declared before the guard: dropping it may run the dtor hook, which locks gAnimMutex.
+        auto owner = findOwner(region, cell, static_cast<::BlockActor const*>(moving), true);
+        if (!owner) continue;
+        std::lock_guard const guard(gAnimMutex);
+        auto const            it = gMovingAction.find(moving);
+        if (it != gMovingAction.end() && !it->second.keep) it->second.keep = std::move(owner);
+    }
+}
+
 // Runs right after the camera re-collects its queues, the only point where a kept instance can be let go
 // safely.
 void requeueHeldMoving(::LevelRendererCamera& camera) {
+    retryHeldOwners();
     std::vector<std::shared_ptr<::BlockActor>> drop;
     {
         std::lock_guard const    guard(gAnimMutex);

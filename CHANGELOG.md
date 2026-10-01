@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-10-01
+
+> Bug-fix prerelease for every Minecraft line (26.10, 26.20, 26.30, 26.40, 26.50). Install the variant for your line, for example `lip install github.com/wo55555/OptiPiston#mc26_50@0.1.4`. The configuration format and C API v1 are unchanged. These fixes have been tested in game on 26.50; the other lines build and pass unit tests.
+
+### Fixed
+
+- Fixed pushed blocks briefly disappearing just as they finish sliding on 26.30 and later.
+- Fixed the piston head disappearing for a moment when a pushed piston is about to arrive.
+- Fixed pushed blocks with block entities (such as chests) briefly vanishing when they hand over to the landed block.
+
 ## [0.1.3] - 2026-10-01
 
 > Bug-fix prerelease. From this version one release carries every Minecraft line (26.10, 26.20, 26.30, 26.40, 26.50), and Lip installs a line by its variant, for example `lip install github.com/wo55555/OptiPiston#mc26_20@0.1.3`. If you installed `0.1.2` or earlier with `#client`, uninstall it first (`lip uninstall github.com/wo55555/OptiPiston#client`), then install the variant for your line. The configuration format and C API v1 are unchanged. The fix has been tested in game on 26.20; the other lines build and pass unit tests.

@@ -200,6 +200,8 @@ std::unordered_map<::BlockPos, HeadOwner, BlockPosHash> gHeadOwners;
 
 // Non-zero while a piston or moving-block renderer is on this thread's stack; logic callers keep native values.
 thread_local int tRenderDepth = 0;
+// Set while drawUnrenderedHeld dispatches, so the camera's material is not taken from its own calls.
+thread_local bool tFallbackDraw = false;
 
 struct RenderScope {
     RenderScope() { ++tRenderDepth; }
@@ -245,10 +247,12 @@ struct CarryVisual {
 struct CellClaim {
     uint64_t    action{};
     std::string wrapped;
-    bool        landed{};    // the real block arrived and its chunk mesh is suppressed
-    bool        released{};  // visual ended, the real block is being re-meshed
-    bool        rebuilt{};   // a build containing the real block has committed
-    uint64_t    liveFrame{}; // frame of that commit; the mesh is on screen from the next frame
+    bool        landed{};           // the real block arrived and its chunk mesh is suppressed
+    bool        released{};         // visual ended, the real block is being re-meshed
+    bool        rebuilt{};          // a build containing the real block has committed
+    uint64_t    liveFrame{};        // frame of that commit; the mesh is on screen from the next frame
+    double      releaseTime{};      // visual time of the release, for the re-mesh latency estimate
+    uint64_t    handoverDeadline{}; // level tick after which a carrier stops waiting for the landed actor
 };
 
 std::mutex         gAnimMutex;
@@ -271,6 +275,8 @@ struct MovingEntry {
     std::shared_ptr<::BlockActor> keep;
     // Read while the instance was being drawn, so later checks need not touch it.
     bool carriesActor{};
+    // gFrame of its last held draw.
+    uint64_t drawnFrame{};
 };
 // Released outside gAnimMutex because the dtor hook locks it.
 std::vector<std::shared_ptr<::BlockActor>> gDropKeep;
@@ -292,6 +298,40 @@ thread_local ::RenderChunkGeometry const* tMeshGeometry = nullptr;
 std::unordered_map<::RenderChunkGeometry const*, std::vector<::BlockPos>> gReleasedMesh;
 // Landed cells found by the renderer; the next tick re-meshes them.
 std::vector<::BlockPos> gPendingRemesh;
+// Landed cells are re-meshed just before their motion ends, so no held tail has to cover the re-mesh. All in visual
+// ticks, guarded by gAnimMutex.
+double                  gLastVisualTime = 0.0;
+double                  gPrevFrameTime  = 0.0;
+double                  gFrameStep      = 0.15;
+double                  gMeshLatency    = 0.3; // release to live
+std::vector<::BlockPos> gEarlyRelease;
+
+// A landed block's own actor (a piston's head, a chest...) can first be drawn a couple of ticks after its mesh, so a
+// carrier stays held until that actor has been seen, at most this long past the re-mesh.
+constexpr uint64_t kHandoverTicks = 4;
+std::atomic_bool   gClaimWatch{false}; // any claim
+// Leaf lock: taken under gAnimMutex, never the other way round.
+std::mutex                                             gActorSeenMutex;
+std::unordered_map<::BlockPos, uint64_t, BlockPosHash> gActorSeen; // cell -> gFrame of its own actor's last draw
+
+void noteActorShown(::BlockPos const& cell) {
+    if (!gClaimWatch.load(std::memory_order_relaxed)) return;
+    std::lock_guard const guard(gActorSeenMutex);
+    gActorSeen[cell] = gFrame.load(std::memory_order_relaxed);
+}
+
+// Heads are noted by drawArm instead, after the per-cell election.
+void noteDispatched(::BlockActor const& actor) {
+    if (tRenderDepth > 0 || actor.mType == ::BlockActorType::PistonArm || actor.mType == ::BlockActorType::MovingBlock)
+        return;
+    noteActorShown(actor.mPosition.get());
+}
+
+bool actorShownRecently(::BlockPos const& cell) {
+    std::lock_guard const guard(gActorSeenMutex);
+    auto const            it = gActorSeen.find(cell);
+    return it != gActorSeen.end() && it->second + 1 >= gFrame.load(std::memory_order_relaxed);
+}
 
 // An external clock (e.g. a replay) wins; in a live world the client level tick runs 1:1 with redstone.
 std::optional<core::ClockSample> visualClock() {
@@ -345,6 +385,11 @@ void forEachMovingAtLocked(::BlockPos const& cell, Fn&& fn) {
 }
 
 void updateMeshWatchLocked() {
+    gClaimWatch.store(!gCellClaims.empty(), std::memory_order_relaxed);
+    if (gCellClaims.empty()) {
+        std::lock_guard const guard(gActorSeenMutex);
+        gActorSeen.clear();
+    }
     gMeshWatch.store(
         std::any_of(
             gCellClaims.begin(),
@@ -379,6 +424,7 @@ std::vector<::BlockPos> clearAnimationStateLocked() {
     gMovingAction.clear();
     gMovingByCell.clear();
     gPendingRemesh.clear();
+    gEarlyRelease.clear();
     gCellClaims.clear();
     gReleasedMesh.clear();
     gClockTracker.reset();
@@ -397,12 +443,19 @@ std::vector<::BlockPos> endActionLocked(uint64_t action) {
     std::vector<::BlockPos> cells;
     for (auto it = gCellClaims.begin(); it != gCellClaims.end();) {
         auto& claim = it->second;
-        if (claim.action != action || claim.released) {
+        if (claim.action == action && claim.rebuilt && gFrame.load(std::memory_order_relaxed) > claim.liveFrame) {
+            // Re-meshed early and already on screen.
+            forEachMovingAtLocked(it->first, [action](MovingEntry& entry) {
+                if (entry.action == action) entry.released = true;
+            });
+            it = gCellClaims.erase(it);
+        } else if (claim.action != action || claim.released) {
             ++it;
         } else if (!claim.landed) {
             it = gCellClaims.erase(it);
         } else {
-            claim.released = true;
+            claim.released    = true;
+            claim.releaseTime = gLastVisualTime;
             cells.push_back(it->first);
             ++it;
         }
@@ -497,6 +550,10 @@ void meshBuildCommitted(::RenderChunkGeometry const* geometry) {
         if (claim == gCellClaims.end() || !claim->second.released || claim->second.rebuilt) continue;
         claim->second.rebuilt   = true;
         claim->second.liveFrame = frame;
+        // Shown from the next frame on, hence the extra step.
+        auto const latency = gLastVisualTime - claim->second.releaseTime + gFrameStep;
+        if (claim->second.releaseTime > 0.0 && latency > 0.0 && latency < 2.0)
+            gMeshLatency += (latency - gMeshLatency) * 0.25;
     }
     gReleasedMesh.erase(it);
     updateMeshWatchLocked();
@@ -579,8 +636,17 @@ std::optional<::Vec3> visualDrawOffset(::MovingBlockActor const& moving, float a
         if (claim != gCellClaims.end() && claim->second.action == entry.action) return ::Vec3{0.0f, 0.0f, 0.0f};
         return std::nullopt;
     }
-    auto const time   = visualTime(alpha);
-    auto       offset = actionOffset(entry.visual, time);
+    auto const time = visualTime(alpha);
+    gLastVisualTime = time;
+    auto const& seg = entry.visual.segment;
+    // A carrier stays drawn until its landed actor shows up, so an early mesh would only double the block mid-motion.
+    if (!entry.carriesActor && static_cast<double>(seg.startTick) + seg.length - time <= gMeshLatency + gFrameStep) {
+        auto const claim = gCellClaims.find(entry.cell);
+        if (claim != gCellClaims.end() && claim->second.action == entry.action && claim->second.landed
+            && !claim->second.released)
+            gEarlyRelease.push_back(entry.cell);
+    }
+    auto offset = actionOffset(entry.visual, time);
     if (entry.carry) {
         auto const tail  = actionOffset(entry.carry->visual, time);
         offset.x        += tail.x;
@@ -690,16 +756,26 @@ bool movingHeld(::MovingBlockActor const& moving) {
     std::lock_guard const guard(gAnimMutex);
     auto const            owned = gMovingAction.find(&moving);
     if (owned == gMovingAction.end()) return false;
-    if (gActionVisuals.contains(owned->second.action)) return true;
+    bool const alive = gActionVisuals.contains(owned->second.action);
     auto const claim = gCellClaims.find(owned->second.cell);
-    if (claim == gCellClaims.end() || claim->second.action != owned->second.action) return false;
-    // The real block is on screen only from the frame after its mesh was uploaded.
+    if (claim == gCellClaims.end() || claim->second.action != owned->second.action) return alive;
+    // The real block is on screen only from the frame after its mesh was uploaded. An early re-mesh goes live just
+    // before the motion ends, so the visual may still be running.
     if (!claim->second.rebuilt || gFrame.load(std::memory_order_relaxed) <= claim->second.liveFrame) return true;
+    // The mesh only shows the block; the carrier still shows its actor until the landed one is drawn.
+    if (owned->second.carriesActor && !actorShownRecently(claim->first)) {
+        auto&      c    = claim->second;
+        auto const tick = gFrameLt.load(std::memory_order_relaxed);
+        if (c.handoverDeadline == 0) c.handoverDeadline = tick + kHandoverTicks;
+        if (tick < c.handoverDeadline) return true;
+    }
     // Every MovingBlock sharing this claim is covered by the same rebuilt mesh.
     forEachMovingAtLocked(claim->first, [action = claim->second.action](MovingEntry& entry) {
         if (entry.action == action) entry.released = true;
     });
-    gCellClaims.erase(claim);
+    // While the visual runs, a fresh instance of the same action may still register here; the kept claim tells it
+    // the cell is already shown. endActionLocked drops it.
+    if (!alive) gCellClaims.erase(claim);
     updateMeshWatchLocked();
     return false;
 }
@@ -787,6 +863,12 @@ bool heldLocked(MovingEntry const& entry) {
     if (gActionVisuals.contains(entry.action)) return true;
     auto const claim = gCellClaims.find(entry.cell);
     return claim != gCellClaims.end() && claim->second.action == entry.action;
+}
+
+void noteHeldDrawn(::MovingBlockActor const& moving) {
+    std::lock_guard const guard(gAnimMutex);
+    auto const            it = gMovingAction.find(&moving);
+    if (it != gMovingAction.end()) it->second.drawnFrame = gFrame.load(std::memory_order_relaxed);
 }
 
 // A landed block's own actor (a chest, a spawner's mob, a lectern's book...) would sit at its final cell while the
@@ -899,6 +981,10 @@ void requeueHeldMoving(::LevelRendererCamera& camera) {
             }
             // An unkept key may already be freed; queueing it would also hand the camera a dangling pointer.
             if (!entry.keep) continue;
+            // Later versions filter the queue by this state before the renderer hook could lift it.
+            auto& interlock                  = interlockOf(*entry.keep);
+            interlock.mRenderVisibilityState = VisibilityState::Visible;
+            interlock.mHasBeenDelayedDeleted = false;
             if (auto* const item = queuedItemOf(entry.keep.get())) held.push_back(item);
         }
         queueMissing(camera, held);
@@ -921,6 +1007,35 @@ void requeueHeldMoving(::LevelRendererCamera& camera) {
     // The dtor hook locks gAnimMutex.
     drop.clear();
     queueFreshMoving(camera);
+}
+
+// Runs once per drawn frame, after the level is rendered.
+void releaseEarlyCells() {
+    std::vector<::BlockPos> cells;
+    {
+        std::lock_guard const guard(gAnimMutex);
+        auto const            step = gLastVisualTime - gPrevFrameTime;
+        if (step > 0.0 && step < 1.0) gFrameStep += (step - gFrameStep) * 0.25;
+        gPrevFrameTime = gLastVisualTime;
+        for (auto const& cell : gEarlyRelease) {
+            auto const it = gCellClaims.find(cell);
+            if (it == gCellClaims.end() || !it->second.landed || it->second.released) continue;
+            it->second.released    = true;
+            it->second.releaseTime = gLastVisualTime;
+            cells.push_back(cell);
+        }
+        gEarlyRelease.clear();
+        if (!cells.empty()) updateMeshWatchLocked();
+    }
+    if (cells.empty()) return;
+    auto  client = ll::service::getClientInstance();
+    auto* player = client ? client->getLocalPlayer() : nullptr;
+    if (player) {
+        rebuildCells(player->getDimensionBlockSource(), cells);
+        return;
+    }
+    std::lock_guard const guard(gAnimMutex);
+    gPendingRemesh.insert(gPendingRemesh.end(), cells.begin(), cells.end());
 }
 
 void markPistonStepped(::BlockActor const* piston) {
@@ -1082,6 +1197,7 @@ void drawArm(
     }
 
     if (skipZombieHead) return;
+    if (isArm && !nested) noteActorShown(entity.mPosition.get());
 
     if (enabled) {
         gFrameLt.store(renderSource.getLevel().getCurrentTick().tickID);
@@ -1143,10 +1259,13 @@ void drawMoving(::BaseActorRenderContext&, ::BlockSource& source, ::BlockActor& 
         if (movingHeld(*movingPtr)) {
             interlock.mRenderVisibilityState = VisibilityState::Visible;
             interlock.mHasBeenDelayedDeleted = false;
+            noteHeldDrawn(*movingPtr);
             draw();
             return;
         }
     }
+    // The fallback only stands in for held draws; the camera had already skipped this one.
+    if (tFallbackDraw) return;
 
     auto const& cellBlock = source.getBlock(entity.mPosition);
 
@@ -1232,6 +1351,7 @@ LL_TYPE_INSTANCE_HOOK(
         );
     };
     if (landedActorCovered(e)) return;
+    noteDispatched(e);
     // The renderer hooks this replaces only ever covered the opaque pass.
     if (renderAlphaLayer) draw();
     else if (e.mType == ::BlockActorType::PistonArm) drawArm(entityRenderContext, renderSource, e, position, draw);
@@ -1286,6 +1406,16 @@ using DispatchedActor = ::BlockActor;
 ::BlockActor& dispatchedActor(DispatchedActor& actor) { return actor; }
 #endif
 
+// The camera's forced material, reused by the fallback only while its address never changes (a static).
+std::atomic<::mce::MaterialPtr const*> gCameraForcedMat{nullptr};
+std::atomic_bool                       gCameraMatMoved{false};
+
+void noteCameraDispatch(::BlockActor const& actor, ::mce::MaterialPtr const& forcedMat) {
+    if (tFallbackDraw || actor.mType != ::BlockActorType::MovingBlock) return;
+    auto const* const previous = gCameraForcedMat.exchange(&forcedMat, std::memory_order_relaxed);
+    if (previous && previous != &forcedMat) gCameraMatMoved.store(true, std::memory_order_relaxed);
+}
+
 // Every block actor type reaches its renderer through the dispatcher; which overload the camera calls is not known,
 // so both skip a covered landed actor.
 LL_TYPE_INSTANCE_HOOK(
@@ -1315,6 +1445,8 @@ LL_TYPE_INSTANCE_HOOK(
     std::optional<::dragon::RenderMetadata> renderMetadata
 ) {
     if (landedActorCovered(dispatchedActor(e))) return;
+    noteDispatched(dispatchedActor(e));
+    noteCameraDispatch(dispatchedActor(e), forcedMat);
     origin(
         entityRenderContext,
         renderSource,
@@ -1361,6 +1493,8 @@ LL_TYPE_INSTANCE_HOOK(
     std::optional<::dragon::RenderMetadata> renderMetadata
 ) {
     if (landedActorCovered(dispatchedActor(e))) return;
+    noteDispatched(dispatchedActor(e));
+    noteCameraDispatch(dispatchedActor(e), forcedMat);
     origin(
         entityRenderContext,
         renderSource,
@@ -1519,7 +1653,10 @@ LL_TYPE_INSTANCE_HOOK(
     ::mce::TextureResourceService& textureResourceService
 ) {
     origin(textureResourceService);
-    if (gFrameDrewActors.exchange(false, std::memory_order_relaxed)) gFrame.fetch_add(1, std::memory_order_relaxed);
+    if (gFrameDrewActors.exchange(false, std::memory_order_relaxed)) {
+        releaseEarlyCells();
+        gFrame.fetch_add(1, std::memory_order_relaxed);
+    }
 }
 #else
 // endFrame is not exported here; renderLevel is the exported per-frame call.
@@ -1533,7 +1670,10 @@ LL_TYPE_INSTANCE_HOOK(
     ::FrameRenderObject const& renderObj
 ) {
     origin(screenContext, renderObj);
-    if (gFrameDrewActors.exchange(false, std::memory_order_relaxed)) gFrame.fetch_add(1, std::memory_order_relaxed);
+    if (gFrameDrewActors.exchange(false, std::memory_order_relaxed)) {
+        releaseEarlyCells();
+        gFrame.fetch_add(1, std::memory_order_relaxed);
+    }
 }
 #endif
 
@@ -1550,6 +1690,56 @@ LL_TYPE_INSTANCE_HOOK(
     origin(parameters);
     requeueHeldMoving(*this);
 }
+
+#if OPTIPISTON_MC >= 2632
+// The camera drops some queued held MovingBlocks before any renderer sees them; those are drawn here.
+void drawUnrenderedHeld(::BaseActorRenderContext& context, bool renderAlphaLayer) {
+    std::vector<std::shared_ptr<::BlockActor>> missed;
+    {
+        std::lock_guard const guard(gAnimMutex);
+        auto const            frame = gFrame.load(std::memory_order_relaxed);
+        for (auto& [moving, entry] : gMovingAction)
+            if (entry.keep && entry.drawnFrame != frame && heldLocked(entry)) missed.push_back(entry.keep);
+    }
+    if (missed.empty()) return;
+    auto  client = ll::service::getClientInstance();
+    auto* player = client ? client->getLocalPlayer() : nullptr;
+    if (!player) return;
+    auto& region = player->getDimensionBlockSource();
+    // A null MaterialPtr, for when the camera's own one is not known to be a static.
+    alignas(::mce::MaterialPtr) static std::byte const noMaterialStorage[sizeof(::mce::MaterialPtr)]{};
+    auto const* const                                  cameraMat  = gCameraForcedMat.load(std::memory_order_relaxed);
+    auto const&                                        forcedMat  = cameraMat && !gCameraMatMoved.load()
+                                                                      ? *cameraMat
+                                                                      : *reinterpret_cast<::mce::MaterialPtr const*>(noMaterialStorage);
+    ::BlockActorRenderDispatcher&                      dispatcher = context.mBlockEntityRenderDispatcher;
+    tFallbackDraw                                                 = true;
+    for (auto const& actor : missed) {
+        auto* const item = queuedItemOf(actor.get());
+        if (!item || item->hasAlphaLayer() != renderAlphaLayer) continue;
+        // The camera hands a landed MovingBlock its cell's real block, not moving_block; match it.
+        auto const& block = region.getBlock(actor->mPosition);
+        dispatcher.render(context, region, *item, block, renderAlphaLayer, forcedMat, nullptr, 0, {});
+    }
+    tFallbackDraw = false;
+}
+
+LL_TYPE_INSTANCE_HOOK(
+    OptiPistonRenderBlockEntitiesHook,
+    ll::memory::HookPriority::Normal,
+    LevelRendererCamera,
+    &LevelRendererCamera::$renderBlockEntities,
+    void,
+    ::BaseActorRenderContext& renderContext,
+    bool                      renderAlphaLayer
+) {
+    origin(renderContext, renderAlphaLayer);
+    if (smoothPistonRenderEnabled() && animationActive()) drawUnrenderedHeld(renderContext, renderAlphaLayer);
+}
+#define OPTIPISTON_RENDER_ENTITIES_HOOK(X) X(OptiPistonRenderBlockEntitiesHook)
+#else
+#define OPTIPISTON_RENDER_ENTITIES_HOOK(X)
+#endif
 
 // The camera dispatches by the cell's block; once the real block lands there, a held MovingBlock gets no
 // renderer. Later versions no longer have this lookup.
@@ -1831,6 +2021,7 @@ void removeHook(bool& installed) {
     X(OptiPistonEndRebuildHook)                                                                                        \
     X(OptiPistonFrameHook)                                                                                             \
     X(OptiPistonPlayerQueueEntitiesHook)                                                                               \
+    OPTIPISTON_RENDER_ENTITIES_HOOK(X)                                                                                 \
     OPTIPISTON_BLOCK_FOR_HOOK(X)                                                                                       \
     X(OptiPistonLandedBlockHook)                                                                                       \
     OPTIPISTON_PROGRESS_HOOK(X)                                                                                        \

@@ -17,7 +17,7 @@
     },
     "variants": [
         {
-            "label": "mc26_10",
+            "label": "client_mc26_10",
             "platform": "win-x64",
             "dependencies": {
                 "github.com/LiteLDev/LeviLamina#client": "26.10.*"
@@ -42,7 +42,7 @@
             ]
         },
         {
-            "label": "mc26_20",
+            "label": "client_mc26_20",
             "platform": "win-x64",
             "dependencies": {
                 "github.com/LiteLDev/LeviLamina#client": "26.20.*"
@@ -67,7 +67,7 @@
             ]
         },
         {
-            "label": "mc26_30",
+            "label": "client_mc26_30",
             "platform": "win-x64",
             "dependencies": {
                 "github.com/LiteLDev/LeviLamina#client": "26.32.*"
@@ -92,7 +92,7 @@
             ]
         },
         {
-            "label": "mc26_40",
+            "label": "client_mc26_40",
             "platform": "win-x64",
             "dependencies": {
                 "github.com/LiteLDev/LeviLamina#client": "26.40.*"
@@ -117,7 +117,7 @@
             ]
         },
         {
-            "label": "mc26_50",
+            "label": "client_mc26_50",
             "platform": "win-x64",
             "dependencies": {
                 "github.com/LiteLDev/LeviLamina#client": "26.51.*"

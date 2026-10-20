@@ -7,9 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-20
+
+> Prerelease for every Minecraft line (26.10, 26.20, 26.30, 26.40, 26.50). Install the variant for your line, for example `lip install github.com/wo55555/OptiPiston#client_mc26_50@0.2.0`. If you installed an earlier `mc26_xx` variant, uninstall it first. The configuration format and C API v1 are unchanged. The render rewrite and the arm lighting fix have been tested in game on 26.50 only; the other lines build and pass unit tests.
+
 ### Changed
 
-- Renamed the Lip variants to `client_mc26_10` through `client_mc26_50` so launchers that only list variants whose label contains `client` show OptiPiston. If you installed an earlier `mc26_xx` variant, uninstall it before installing the new one.
+- Rewrote the render ownership of piston arms, heads, and pushed blocks. Visuals now follow one timeline, and a pushed block is handed over to the landed block only after the real block has been drawn.
+- Renamed the Lip variants to `client_mc26_10` through `client_mc26_50` so launchers that only list variants whose label contains `client` show OptiPiston.
+- Added `probe` and `observe` build options for diagnostics. They are off in release builds.
+
+### Fixed
+
+- Fixed the piston arm and head turning black for a moment after retracting with a block, on 26.50. The head cell briefly reports no light while the block lands there; the arm now uses the surrounding light only in that case. Other lines keep the vanilla lighting and are not changed by this fix.
 
 ## [0.1.4] - 2026-10-01
 
@@ -66,7 +76,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Singleplayer world speed with optional audio and particle scaling.
 - `/optipiston` client command and a C API for Playback's replay clock.
 
-[Unreleased]: https://github.com/wo55555/OptiPiston/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/wo55555/OptiPiston/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/wo55555/OptiPiston/compare/v0.1.4...v0.2.0
 [0.1.3]: https://github.com/wo55555/OptiPiston/compare/v0.1.2-mc26.20...v0.1.3
 [0.1.2-mc26.20]: https://github.com/wo55555/OptiPiston/compare/v0.1.1-mc26.20...v0.1.2-mc26.20
 [0.1.1-mc26.20]: https://github.com/wo55555/OptiPiston/compare/v0.1.0-mc26.20...v0.1.1-mc26.20

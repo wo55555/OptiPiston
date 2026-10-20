@@ -33,9 +33,9 @@ jobs:
           if ($tag -notmatch '^v(\d+\.\d+\.\d+)$') { throw "Unexpected release tag: $tag" }
           $tooth = Get-Content tooth.json -Raw | ConvertFrom-Json
           if ($tooth.version -ne $Matches[1]) { throw "tooth.json version $($tooth.version) does not match the release tag" }
-          # Lip labels cannot contain dots: variant mc26_20 is line 26.20.
+          # Lip labels cannot contain dots: variant client_mc26_20 is line 26.20.
           $lines = @($tooth.variants | ForEach-Object {
-            if ($_.label -notmatch '^mc(\d+)_(\d+)$') { throw "Unexpected variant label: $($_.label)" }
+            if ($_.label -notmatch '^client_mc(\d+)_(\d+)$') { throw "Unexpected variant label: $($_.label)" }
             "$($Matches[1]).$($Matches[2])"
           })
           if (-not $lines) { throw "tooth.json has no variants" }

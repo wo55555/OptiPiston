@@ -39,7 +39,7 @@ OptiPiston 按可配置的平滑时间线重新绘制活塞臂及其推动的方
 1. 在 LeviLauncher 左侧边栏选择 **Download（下载）**，找到[兼容性](#兼容性)中所列的 Minecraft 版本，创建使用 **LeviLamina** 加载器的实例。
 2. 选择 **Launch（启动）**，选中该实例，然后在**内容下载**区域选择 **lip**。
 3. 搜索 **OptiPiston**，打开由 `wo55555` 发布的软件包。
-4. 选择最新版本，并按[兼容性](#兼容性)选择与实例 Minecraft 版本线对应的变体（例如 `mc26_20`），然后点击**安装**。Lip 不会根据已安装的 LeviLamina 版本自动选择变体。
+4. 选择最新版本，并按[兼容性](#兼容性)选择与实例 Minecraft 版本线对应的变体（例如 `client_mc26_20`），然后点击**安装**。Lip 不会根据已安装的 LeviLamina 版本自动选择变体。
 5. 启动游戏并进入世界。活塞动画默认开启，可用 `/optipiston status` 查看当前状态。
 
 ### 使用 Lip 命令行安装
@@ -50,7 +50,7 @@ OptiPiston 按可配置的平滑时间线重新绘制活塞臂及其推动的方
 lip install github.com/wo55555/OptiPiston#<variant>@<version>
 
 # 示例：Minecraft 26.20 / LeviLamina 26.20.*
-lip install github.com/wo55555/OptiPiston#mc26_20@0.1.3
+lip install github.com/wo55555/OptiPiston#client_mc26_20@<version>
 ```
 
 必须带上变体。`0.1.2` 及更早版本使用 `#client` 安装；请先运行 `lip uninstall github.com/wo55555/OptiPiston#client` 卸载，再安装新变体。
@@ -135,13 +135,13 @@ API v1 还可以读写活塞动画开关和时长；设置值会限制在支持�
 
 ## 兼容性
 
-| Minecraft 版本线 | LeviLamina | Lip 变体  | 状态                          |
-| ---------------- | ---------- | --------- | ----------------------------- |
-| 26.10            | `26.10.*`  | `mc26_10` | 预发布，尚未实机测试          |
-| 26.20            | `26.20.*`  | `mc26_20` | 预发布，已在 `0.1.0` 实机测试 |
-| 26.30            | `26.32.*`  | `mc26_30` | 预发布，尚未实机测试          |
-| 26.40            | `26.40.*`  | `mc26_40` | 预发布，尚未实机测试          |
-| 26.50            | `26.51.*`  | `mc26_50` | 预发布，尚未实机测试          |
+| Minecraft 版本线 | LeviLamina | Lip 变体         | 状态                          |
+| ---------------- | ---------- | ---------------- | ----------------------------- |
+| 26.10            | `26.10.*`  | `client_mc26_10` | 预发布，尚未实机测试          |
+| 26.20            | `26.20.*`  | `client_mc26_20` | 预发布，已在 `0.1.0` 实机测试 |
+| 26.30            | `26.32.*`  | `client_mc26_30` | 预发布，尚未实机测试          |
+| 26.40            | `26.40.*`  | `client_mc26_40` | 预发布，尚未实机测试          |
+| 26.50            | `26.51.*`  | `client_mc26_50` | 预发布，尚未实机测试          |
 
 OptiPiston 面向 Windows x64 平台的 Minecraft 基岩版，以纯客户端模组形式发布。所有版本线都在同一个发行版 [`v0.1.3`](https://github.com/wo55555/OptiPiston/releases/tag/v0.1.3) 中发布，每条版本线一个资产 `OptiPiston-mc<版本线>-windows-x64.zip`，各自只能在所列 LeviLamina 版本上加载。目前已发布的都是预发布版本。
 

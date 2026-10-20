@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Renamed the Lip variants to `client_mc26_10` through `client_mc26_50` so launchers that only list variants whose label contains `client` show OptiPiston. If you installed an earlier `mc26_xx` variant, uninstall it before installing the new one.
+
 ## [0.1.4] - 2026-10-01
 
 > Bug-fix prerelease for every Minecraft line (26.10, 26.20, 26.30, 26.40, 26.50). Install the variant for your line, for example `lip install github.com/wo55555/OptiPiston#mc26_50@0.1.4`. The configuration format and C API v1 are unchanged. These fixes have been tested in game on 26.50; the other lines build and pass unit tests.

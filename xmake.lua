@@ -58,7 +58,7 @@ if not has_config("vs_runtime") then
 end
 
 -- Lip reads tooth.json from the release tag: one release carries every line, one variant each.
--- Lip labels cannot contain dots, so line 26.20 is variant `mc26_20`.
+-- The launcher only lists variants whose label contains `client`, and labels cannot contain dots: line 26.20 is variant `client_mc26_20`.
 local function sync_tooth(io, os, path, json)
     local file = path.join(os.projectdir(), "tooth.json")
     local text = io.readfile(file)
@@ -72,7 +72,7 @@ local function sync_tooth(io, os, path, json)
         variants[variant.label] = variant
     end
     for name, line in pairs(mc_lines) do
-        local label = "mc" .. name:gsub("%.", "_")
+        local label = "client_mc" .. name:gsub("%.", "_")
         local variant = variants[label]
         local range = variant and variant.dependencies["github.com/LiteLDev/LeviLamina#client"]
         local url = variant and variant.assets[1].urls[1] or ""

@@ -20,6 +20,20 @@ option("mc")
     set_values("26.10", "26.20", "26.30", "26.40", "26.50")
 option_end()
 
+-- Temporary render diagnostics; turn off with --probe=n for frame-rate comparisons.
+option("probe")
+    set_default(true)
+    set_showmenu(true)
+    set_description("Build the temporary render diagnostics")
+option_end()
+
+-- Observation probes only (no render diagnostics), for frame-rate faithful runs: --probe=n --observe=y.
+option("observe")
+    set_default(false)
+    set_showmenu(true)
+    set_description("Build only the observation probes")
+option_end()
+
 -- levibuildscript reads target_type for the prelink target and the manifest platform.
 option("target_type")
     set_default("client")
@@ -88,6 +102,8 @@ local function windows_flags()
         )
         -- The rapidjson bundled with LeviLamina 26.10 does not compile under current clang.
         set_toolchains(mc_version == "26.10" and "msvc" or "clang-cl")
+        -- LeviLamina 26.51.7 headers call std::to_underlying and build with this define themselves.
+        if mc_version == "26.50" then add_defines("_HAS_CXX23=1") end
     end
     set_languages("c++20")
     set_symbols("debug")
@@ -114,6 +130,12 @@ target("OptiPiston")
     add_files("src/mod/**.cpp", "src/platform/bedrock/**.cpp")
     add_includedirs("src", "include")
     add_defines("OPTIPISTON_MC=" .. mc_line.code)
+    if not has_config("probe") then
+        add_defines("OPTIPISTON_PROBE=0")
+    end
+    if has_config("observe") then
+        add_defines("OPTIPISTON_OBSERVE_ONLY=1")
+    end
     on_load(function (target)
         sync_tooth(io, os, path, import("core.base.json"))
         target:add("rules", "@levibuildscript/modpacker", {

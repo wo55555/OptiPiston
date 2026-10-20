@@ -2,7 +2,12 @@
 
 // Implemented by each src/platform/mcXXXX adapter.
 
+#include <string>
+
 namespace optipiston::platform {
+
+// Ends the current observation segment (observe builds only); returns false when not compiled in.
+[[nodiscard]] bool observeMark(std::string const& label);
 
 [[nodiscard]] bool hookPistonRender(bool enable);
 

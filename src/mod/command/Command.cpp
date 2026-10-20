@@ -22,6 +22,10 @@ struct SpeedParams {
     float value{};
 };
 
+struct MarkParams {
+    std::string label;
+};
+
 namespace {
 
 using namespace ll::i18n_literals;
@@ -95,6 +99,14 @@ void registerCommands(std::string const& name) {
         auto const presets = OptiPiston::getInstance().getConfig().worldSpeed.presets;
         setWorldSpeed(output, core::previousPreset(presets, core::worldSpeedSettings().requested.load()));
     });
+
+    // Diagnostic builds only: closes the observation segment and starts a labelled one.
+    command.overload<MarkParams>().text("mark").required("label").execute(
+        [](CommandOrigin const&, CommandOutput& output, MarkParams const& params) {
+            if (platform::observeMark(params.label)) output.success("mark " + params.label);
+            else output.error("mark: not an observe build");
+        }
+    );
 
     command.overload().text("status").execute([](CommandOrigin const&, CommandOutput& output) {
         auto const& piston  = core::pistonSettings();

@@ -33,9 +33,9 @@ jobs:
           if ($tag -notmatch '^v(\d+\.\d+\.\d+)$') { throw "Unexpected release tag: $tag" }
           $tooth = Get-Content tooth.json -Raw | ConvertFrom-Json
           if ($tooth.version -ne $Matches[1]) { throw "tooth.json version $($tooth.version) does not match the release tag" }
-          # Lip labels cannot contain dots: variant mc26_20 is line 26.20.
+          # Lip labels cannot contain dots: variant client_mc26_20 is line 26.20.
           $lines = @($tooth.variants | ForEach-Object {
-            if ($_.label -notmatch '^mc(\d+)_(\d+)$') { throw "Unexpected variant label: $($_.label)" }
+            if ($_.label -notmatch '^client_mc(\d+)_(\d+)$') { throw "Unexpected variant label: $($_.label)" }
             "$($Matches[1]).$($Matches[2])"
           })
           if (-not $lines) { throw "tooth.json has no variants" }
@@ -81,8 +81,9 @@ jobs:
           xmake repo -u
 
       # Configure checks every tooth.json variant against xmake.lua and syncs the version.
+      # probe defaults on for local diagnosis; published binaries must not include it.
       - run: |
-          xmake f -a x64 -m release -p windows --target_type=client --mc=${{ matrix.mc }} -y
+          xmake f -a x64 -m release -p windows --target_type=client --mc=${{ matrix.mc }} --probe=n --observe=n -y
 
       # Lip installs from the tag, so tooth.json must already be in sync there.
       - shell: pwsh

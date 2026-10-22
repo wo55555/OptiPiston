@@ -2,7 +2,7 @@ add_rules("mode.debug", "mode.release")
 
 add_repositories("levimc-repo https://github.com/LiteLDev/xmake-repo.git")
 
-local optipiston_version = "0.1.4"
+local optipiston_version = "0.2.0"
 
 -- One DLL per release line; code is exposed to the adapter as OPTIPISTON_MC.
 local mc_lines = {
@@ -18,6 +18,20 @@ option("mc")
     set_showmenu(true)
     set_description("Target Minecraft release line")
     set_values("26.10", "26.20", "26.30", "26.40", "26.50")
+option_end()
+
+-- Temporary render diagnostics; turn off with --probe=n for frame-rate comparisons.
+option("probe")
+    set_default(true)
+    set_showmenu(true)
+    set_description("Build the temporary render diagnostics")
+option_end()
+
+-- Observation probes only (no render diagnostics), for frame-rate faithful runs: --probe=n --observe=y.
+option("observe")
+    set_default(false)
+    set_showmenu(true)
+    set_description("Build only the observation probes")
 option_end()
 
 -- levibuildscript reads target_type for the prelink target and the manifest platform.
@@ -44,7 +58,7 @@ if not has_config("vs_runtime") then
 end
 
 -- Lip reads tooth.json from the release tag: one release carries every line, one variant each.
--- Lip labels cannot contain dots, so line 26.20 is variant `mc26_20`.
+-- The launcher only lists variants whose label contains `client`, and labels cannot contain dots: line 26.20 is variant `client_mc26_20`.
 local function sync_tooth(io, os, path, json)
     local file = path.join(os.projectdir(), "tooth.json")
     local text = io.readfile(file)
@@ -58,7 +72,7 @@ local function sync_tooth(io, os, path, json)
         variants[variant.label] = variant
     end
     for name, line in pairs(mc_lines) do
-        local label = "mc" .. name:gsub("%.", "_")
+        local label = "client_mc" .. name:gsub("%.", "_")
         local variant = variants[label]
         local range = variant and variant.dependencies["github.com/LiteLDev/LeviLamina#client"]
         local url = variant and variant.assets[1].urls[1] or ""
@@ -88,6 +102,11 @@ local function windows_flags()
         )
         -- The rapidjson bundled with LeviLamina 26.10 does not compile under current clang.
         set_toolchains(mc_version == "26.10" and "msvc" or "clang-cl")
+        -- clang-cl takes the vectorized std::find/count path in MSVC 14.51's xutility and then
+        -- fails its "unexpected size" assert (seen for CellPos on GitHub windows-latest).
+        if mc_version ~= "26.10" then add_defines("_USE_STD_VECTOR_ALGORITHMS=0") end
+        -- LeviLamina 26.51.7 headers call std::to_underlying and build with this define themselves.
+        if mc_version == "26.50" then add_defines("_HAS_CXX23=1") end
     end
     set_languages("c++20")
     set_symbols("debug")
@@ -114,6 +133,12 @@ target("OptiPiston")
     add_files("src/mod/**.cpp", "src/platform/bedrock/**.cpp")
     add_includedirs("src", "include")
     add_defines("OPTIPISTON_MC=" .. mc_line.code)
+    if not has_config("probe") then
+        add_defines("OPTIPISTON_PROBE=0")
+    end
+    if has_config("observe") then
+        add_defines("OPTIPISTON_OBSERVE_ONLY=1")
+    end
     on_load(function (target)
         sync_tooth(io, os, path, import("core.base.json"))
         target:add("rules", "@levibuildscript/modpacker", {

@@ -102,6 +102,9 @@ local function windows_flags()
         )
         -- The rapidjson bundled with LeviLamina 26.10 does not compile under current clang.
         set_toolchains(mc_version == "26.10" and "msvc" or "clang-cl")
+        -- clang-cl takes the vectorized std::find/count path in MSVC 14.51's xutility and then
+        -- fails its "unexpected size" assert (seen for CellPos on GitHub windows-latest).
+        if mc_version ~= "26.10" then add_defines("_USE_STD_VECTOR_ALGORITHMS=0") end
         -- LeviLamina 26.51.7 headers call std::to_underlying and build with this define themselves.
         if mc_version == "26.50" then add_defines("_HAS_CXX23=1") end
     end

@@ -218,12 +218,29 @@ std::atomic<uint64_t> gHeadOwnerRound{0};
 struct HeadOwner {
     uint64_t            round{};
     ::BlockActor const* actor{};
-    int                 rank{};
+    // Rank inputs are kept instead of the rank, so only a contested cell has to look at the stepped set.
+    ::BlockActor const* claimant{};
+    bool                cargo{};
 };
 
-// Leaf lock over this table and gSteppedPistons: the render thread takes it once per arm per frame.
-std::mutex                                              gHeadMutex;
-std::unordered_map<::BlockPos, HeadOwner, BlockPosHash> gHeadOwners;
+// Leaf lock over gSteppedPistons; only contested cells and the piston tick take it.
+std::mutex gHeadMutex;
+
+// A cell's heads are all drawn by one thread within one pass, so each drawing thread elects in its own table and
+// the per-arm path takes no lock. Tables stay registered until the module goes away, never freed under a thread.
+struct HeadTable {
+    uint64_t                                                epoch{};
+    uint64_t                                                round{};
+    std::unordered_map<::BlockPos, HeadOwner, BlockPosHash> owners;
+};
+
+std::atomic<uint64_t>                   gHeadEpoch{0};
+std::mutex                              gHeadTablesMutex;
+std::vector<std::unique_ptr<HeadTable>> gHeadTables;
+thread_local HeadTable*                 tHeadTable = nullptr;
+#if OPTIPISTON_PROBE
+std::atomic<std::size_t> gProbeHeadOwners{0};
+#endif
 
 // ---- Render-only animation on the visual clock; native progress, state and world blocks stay untouched ----
 
@@ -231,6 +248,16 @@ std::unordered_map<::BlockPos, HeadOwner, BlockPosHash> gHeadOwners;
 thread_local int tRenderDepth = 0;
 // The proxy being dispatched by drawProxies on this thread.
 thread_local ::BlockActor const* tProxyDraw = nullptr;
+
+#if OPTIPISTON_MC == 2651
+// Set around one proxy dispatch: the cell the proxy stands in and where the last lit answer for that cell is kept.
+struct ProxyLightFix {
+    bool                   active{};
+    ::BlockPos             cell{};
+    std::atomic<uint16_t>* memory{};
+};
+thread_local ProxyLightFix tProxyLightFix;
+#endif
 
 struct RenderScope {
     RenderScope() { ++tRenderDepth; }
@@ -293,6 +320,8 @@ struct CellShared {
     std::atomic_bool earlyRemesh{false};
     // The draw read the world empty under the landed cell this frame; taken once per frame by advanceFrame.
     std::atomic_bool blockGone{false};
+    // Last non-dark light answer the renderer got for the cell while its proxy was dispatched; 0 if none yet.
+    std::atomic<uint16_t> lightMemory{0};
     OPTIPISTON_PROBE_DO(std::atomic<uint64_t> strippedFrame{0};) // last frame the proxy drew without its actor copy
 };
 
@@ -403,6 +432,8 @@ PerfSlot gFrameWork;                                // OptiPiston work per frame
 
 // The thread that runs the frame hook.
 thread_local bool tRenderThread = false;
+// Innermost perf scope open on this thread (a PerfId), or -1; names the caller of shared work such as view builds.
+thread_local int tPerfCur = -1;
 // Running (not paused) scopes on this thread, and the time the outermost ones added since the last frame end.
 thread_local int      tPerfDepth = 0;
 thread_local uint64_t tWorkTicks = 0;
@@ -443,7 +474,10 @@ void perfRecord(PerfId id, uint64_t ticks) {
 // Times our own code only: pause() around calls into the game, so its time is not ours.
 class PerfScope {
 public:
-    explicit PerfScope(PerfId id) : mId(id), mStart(perfNow()) { ++tPerfDepth; }
+    explicit PerfScope(PerfId id) : mId(id), mPrev(tPerfCur), mStart(perfNow()) {
+        tPerfCur = static_cast<int>(id);
+        ++tPerfDepth;
+    }
     ~PerfScope() { stop(); }
     PerfScope(PerfScope const&)            = delete;
     PerfScope& operator=(PerfScope const&) = delete;
@@ -464,12 +498,14 @@ public:
     void stop() {
         pause();
         if (mDone) return;
-        mDone = true;
+        mDone    = true;
+        tPerfCur = mPrev;
         perfRecord(mId, mElapsed);
     }
 
 private:
     PerfId   mId;
+    int      mPrev;
     uint64_t mStart;
     uint64_t mElapsed{};
     bool     mRunning{true};
@@ -517,6 +553,44 @@ struct PerfCounts {
     std::atomic<uint64_t> viewEntries{0}; // table entries copied by render view builds
 };
 PerfCounts gPerfCounts;
+
+// Counters only, no timers inside the loops they describe, so a perf-only run stays close to a build without probes.
+constexpr int      kPerfSlots   = static_cast<int>(PerfId::Count) + 1; // last slot: no scope open
+constexpr uint32_t kLightSample = 1024;                              // one getLightColor call in this many is timed
+struct PerfCounts2 {
+    // Render view builds by the scope that asked for them; ticks exclude the wait for the lock.
+    std::atomic<uint64_t> viewBy[kPerfSlots]{};
+    std::atomic<uint64_t> viewByTicks[kPerfSlots]{};
+    std::atomic<uint64_t> viewByEntries[kPerfSlots]{};
+    std::atomic<uint64_t> meshPubs{};
+    std::atomic<uint64_t> meshPubEntries{};
+    std::atomic<uint64_t> sweepCalls{};    // sweepActions entered
+    std::atomic<uint64_t> sweepIdle{};     // left at the idle-world gate
+    std::atomic<uint64_t> sweepLocked{};   // took gAnimMutex
+    std::atomic<uint64_t> sweepAdvanced{}; // the tick had moved, so the tables were walked
+    std::atomic<uint64_t> sweepCells{};    // cells handed to rebuildCells by sweeps
+    std::atomic<uint64_t> rebuildCalls{};
+    std::atomic<uint64_t> rebuildCells{};
+    std::atomic<uint64_t> rebuildSubchunks{}; // distinct 16-cube subchunks the +-1 boxes of one call touch, summed
+    std::atomic<uint64_t> pruneRuns{};        // markPistonStepped walked a whole table
+    std::atomic<uint64_t> pruneScanned{};
+    std::atomic<uint64_t> pruneErased{};
+    std::atomic<uint64_t> stepCalls{};        // markPistonStepped calls
+    std::atomic<uint64_t> clockCalls{};       // visualClock calls on the render thread
+    std::atomic<uint64_t> clockFrames{};
+    std::atomic<uint64_t> lightSeen[2]{};     // sampled getLightColor calls [render, other]
+    std::atomic<uint64_t> lightGameTicks[2]{}; // sampled time inside the game's function
+    std::atomic<uint64_t> lightOwnTicks[2]{};  // sampled time in our hook around it
+    std::atomic<uint64_t> scanWindow{};        // pistons inside their scan window with a live action
+    std::atomic<uint64_t> scanNoAttached{};    // of those, no attached list yet
+    std::atomic<uint64_t> scanAttSettled{};    // of those, a list whose derived cells are all already tracked
+    // Lookups and their hits by where the candidate came from: 0 line, 1 attached, 2 attached+facing, 3 attached-facing.
+    std::atomic<uint64_t> scanLookRole[4]{};
+    std::atomic<uint64_t> scanHitRole[4]{};
+    std::atomic<uint64_t> scanHitLineOnly{};   // hits by the line when the piston had an attached list (the list missed it)
+};
+PerfCounts2 gPerfCounts2;
+thread_local uint32_t tClockCalls = 0;
 
 // drawArm tallies, flushed once per frame so the hot path adds no atomics.
 struct ArmTally {
@@ -746,6 +820,7 @@ std::shared_ptr<RenderView const> acquireRenderView() {
     auto const                        revision = gRevision.load(std::memory_order_acquire);
     if (auto current = gRenderView.load(std::memory_order_acquire); current && current->revision == revision)
         return current;
+    OPTIPISTON_PROBE_DO(int const caller = tPerfCur < 0 ? kPerfSlots - 1 : tPerfCur; auto const buildStart = perfNow();)
     OPTIPISTON_PERF_SCOPE(perf, ViewBuild);
     OPTIPISTON_PROBE_DO(gProbeViewBuilds.fetch_add(1, std::memory_order_relaxed);)
     auto fresh      = std::make_shared<RenderView>();
@@ -762,6 +837,14 @@ std::shared_ptr<RenderView const> acquireRenderView() {
         if (rec.proxy && rec.timeline.state() != PushState::Done) fresh->proxied.push_back(&rec);
     std::shared_ptr<RenderView const> published = std::move(fresh);
     retired                                     = gRenderView.exchange(published, std::memory_order_acq_rel);
+    OPTIPISTON_PROBE_DO(
+        gPerfCounts2.viewBy[caller].fetch_add(1, std::memory_order_relaxed);
+        gPerfCounts2.viewByTicks[caller].fetch_add(perfNow() - buildStart, std::memory_order_relaxed);
+        gPerfCounts2.viewByEntries[caller].fetch_add(
+            published->cells.size() + published->pistons.size() + published->actions.size(),
+            std::memory_order_relaxed
+        );
+    )
     return published;
 }
 
@@ -790,6 +873,15 @@ public:
         if (!mView || (mView->revision != revision && !(mLagging && mLagRevision == revision))) refresh();
         return *mView;
     }
+    // The clock read once for the whole pass: every arm of one pass answers from the same sample.
+    template <class Sample>
+    std::optional<core::ClockSample> const& clock(Sample&& sample) {
+        if (!mClockKnown) {
+            mClock      = sample();
+            mClockKnown = true;
+        }
+        return mClock;
+    }
     // Caller holds gAnimMutex and has just moved the revision from `before` to `after` by adding a cell.
     void created(uint64_t before, uint64_t after) {
         if (!mView || (mView->revision != before && !(mLagging && mLagRevision == before))) return;
@@ -810,6 +902,8 @@ private:
     std::vector<std::shared_ptr<RenderView const>> mRetired;
     bool                                           mLagging{};
     uint64_t                                       mLagRevision{};
+    std::optional<core::ClockSample>               mClock;
+    bool                                           mClockKnown{};
 };
 
 // The current render view: the pass's cached one on the render thread, otherwise a fresh acquisition.
@@ -891,6 +985,10 @@ void flushLocked() {
         OPTIPISTON_PERF_SCOPE(publish, MeshPublish);
         gMeshView.store(std::make_shared<core::MeshView>(gMeshBuilder), std::memory_order_release);
         gMeshVersion.fetch_add(1, std::memory_order_release);
+        OPTIPISTON_PROBE_DO(
+            gPerfCounts2.meshPubs.fetch_add(1, std::memory_order_relaxed);
+            gPerfCounts2.meshPubEntries.fetch_add(gMeshBuilder.size(), std::memory_order_relaxed);
+        )
         OPTIPISTON_PROBE_DO(gProbeMeshPublishes.fetch_add(1, std::memory_order_relaxed);)
     }
     // Builds that started before the publication cannot be relied on to have seen the awaiting state.
@@ -985,7 +1083,32 @@ struct ProbeCounters {
     std::atomic<uint64_t> innerPassed{0};   // tessellateBlockInWorld reached for a managed cell, not suppressed
     std::atomic<uint64_t> innerHidden{0};   // tessellateBlockInWorld reached for a managed cell, suppressed
     std::atomic<uint64_t> actorStripped{0}; // proxy drawn without its actor copy because the landed actor was drawn
-    std::atomic<uint64_t> scanPistons{0};   // pistons scanTargets looked at while inside their scan window
+    // Pre-arrival flicker probe (r74).
+    std::atomic<uint64_t> dupEpisodes{0};    // closed runs of consecutive frames in which a cell was drawn twice
+    std::atomic<uint64_t> dupMs{0};          // their summed duration, wall milliseconds
+    std::atomic<uint64_t> dupMaxFrames{0};   // longest such run
+    std::atomic<uint64_t> dupVisFrames{0};   // frames of those runs in which the proxy was over 0.1 block from the cell
+    std::atomic<uint64_t> animCellFrames{0}; // cell-frames in Animating drawn by their proxy (denominator)
+    std::atomic<uint64_t> zeroAnim{0};       // zero (nobody draws the cell) while the cell is Animating
+    std::atomic<uint64_t> unpositioned{0};   // Animating proxy drawn while visualDrawOffset gave no offset
+    std::atomic<uint64_t> posChecks{0};      // an Animating proxy compared with its position on the previous frame
+    std::atomic<uint64_t> posJump{0};        // it moved over twice as far as the visual time that passed allows
+    std::atomic<uint64_t> posBack{0};        // it moved away from its cell while the visual time moved forward
+    std::atomic<uint64_t> lightQueries{0};   // light queries seen inside proxy dispatches (positive control; 26.50 only)
+    std::atomic<uint64_t> lightFrames{0};    // Animating proxy frames in which the light hook saw queries
+    std::atomic<uint64_t> lightAnyDark{0};   // of those, frames in which some queried cell read 0/0
+    std::atomic<uint64_t> lightSelfDark{0};  // of those, frames in which the proxy's own cell read 0/0
+    std::atomic<uint64_t> lightFlip{0};      // dark pattern differed from the cell's previous Animating frame
+    std::atomic<uint64_t> lightSelfFixed{0}; // own-cell 0/0 answers replaced by the cell's remembered lit answer
+    std::atomic<uint64_t> lightSelfNoMem{0}; // own-cell 0/0 answers with nothing remembered, passed on as they were
+    std::atomic<uint64_t> armGapMid{0};      // armGap of a running piston that still had over 0.05 block to go
+    std::atomic<uint64_t> clkChecks{0};      // visual clock advance compared with the wall clock
+    std::atomic<uint64_t> clkBack{0};        // the visual clock went backwards between two frames
+    std::atomic<uint64_t> clkStall{0};       // it did not move although the wall clock did
+    std::atomic<uint64_t> clkSpread{0};      // proxies of one frame drew with visual times over 0.02 tick apart
+    std::atomic<uint64_t> clkErr[7]{};       // |advance - wall*rate| in ticks: <.02 <.05 <.1 <.25 <.5 <.9 >=.9
+    std::atomic<uint64_t> armGapLen[5]{};    // frames a head stayed gone before it drew again: 1, 2, 3-5, 6-20, 21+
+    std::atomic<uint64_t> scanPistons{0};    // pistons scanTargets looked at while inside their scan window
     std::atomic<uint64_t> scanLookups{0};   // getBlockEntity calls made by scanTargets
     std::atomic<uint64_t> cellsMax{0};      // largest cell table seen since the last sum
     std::atomic<uint64_t> pistonsMax{0};    // largest piston visual table seen since the last sum
@@ -1004,6 +1127,12 @@ struct ProbeTally {
     int       vanilla{};
     float     minOffset{1.0e9f};
     float     maxOffset{-1.0e9f};
+    double    time{};   // visual time of the last draw that positioned the proxy
+    bool      timed{};  // time is valid; vx/vy/vz hold that draw's offset
+    float     vx{}, vy{}, vz{};
+    int       lightQ{};        // light queries made while the proxy was dispatched
+    int       lightDark{};     // of those, answered 0/0
+    int       lightSelfDark{}; // of those, asked for the proxy's own cell and answered 0/0
     int       why{}; // ProbeWhy::reason of the last game instance drawn for the cell
     uint64_t  whyRec{};
     uint64_t  whyPiston{};
@@ -1041,7 +1170,29 @@ struct ProbeCell {
     uint64_t                     lastTessFrame{}; // last frame a build tessellated the real block of this cell
     bool                         lastTessProduced{};
     uint64_t vanishFrames{}; // consecutive frames the cell's block was in the world but drawn by nobody
-    int      doubleLogged{};
+    int      doubleLogged{}; // double-draw frames of this action so far
+    // The open double-draw episode (consecutive frames with the same cell drawn twice); dupFrames == 0 when none.
+    int                                   dupFrames{};
+    uint64_t                              dupStart{};
+    uint64_t                              dupLastFrame{};
+    float                                 dupStartOff{}; // distance the proxy still had to go on the first frame
+    float                                 dupEndOff{};   // ... and on the last
+    int                                   dupVis{};      // frames of the episode with the proxy over 0.1 block away
+    char const*                           dupWho{};
+    char const*                           dupState{};
+    std::string                           dupWorld; // block the world held in the cell when the episode began
+    std::chrono::steady_clock::time_point dupStartWall{};
+    std::chrono::steady_clock::time_point dupLastWall{};
+    // The previous Animating frame that positioned the proxy: its offset from the cell, the visual time, the light.
+    float    lastX{}, lastY{}, lastZ{};
+    double   lastTime{};
+    uint64_t lastPosFrame{};
+    bool     havePos{};
+    int      lastLightSig{-1}; // queries, dark answers and own-cell dark answers of the previous Animating frame
+    uint64_t lastLightFrame{};
+    int      stepLogged{};
+    int      unposLogged{};
+    uint64_t regressFrame{}; // last frame a build committed without this cell's block (the mesh stopped showing it)
     int      zeroLogged{};
     int      followStarts{};  // builds of the geometry started after the verifying commit
     int      followCommits{}; // builds of the geometry committed after it
@@ -1085,6 +1236,7 @@ struct ProbeArm {
 // Per animating piston across frames; frames are logFrame values.
 struct ProbeArmCell {
     uint64_t action{};
+    int64_t  gapStart{-1};        // frame of the armGap still open, -1 when none
     int64_t  lastDrawnFrame{-1000};
     int64_t  lastActiveFrame{-1000};
     int64_t  lastLogFrame{-1000}; // armGap
@@ -1106,6 +1258,15 @@ std::string                                                gProbeBuffer;
 std::FILE*                                                 gProbeFile = nullptr;
 std::chrono::steady_clock::time_point                      gProbeLastSum{};
 std::unordered_map<::BlockPos, ProbeTally, BlockPosHash>   gProbeTally;
+// The first positioned proxy draw of the current frame: when it happened and the visual time it used.
+bool                                                       gProbeDrawSeen{};
+std::chrono::steady_clock::time_point                      gProbeDrawWall{};
+double                                                     gProbeDrawTime{};
+// The previous frame that drew a positioned proxy, for the clock-advance check.
+bool                                                       gProbeClkValid{};
+std::chrono::steady_clock::time_point                      gProbeClkWall{};
+double                                                     gProbeClkTime{};
+double                                                     gProbeClkRate{};
 std::unordered_map<::BlockPos, ProbeCell, BlockPosHash>    gProbeCells;
 std::unordered_map<::BlockPos, ProbeRemesh, BlockPosHash>  gProbeRemesh;
 std::unordered_map<::BlockPos, ProbeArm, BlockPosHash>     gProbeArm;      // this frame, by arm position
@@ -1253,6 +1414,15 @@ std::atomic<uint64_t> gProbeGone[2]{};
 // Pass of the proxy being dispatched (0 opaque, 1 alpha).
 thread_local int      tProbePass = 0;
 thread_local ProbeWhy tProbeWhy;
+// Light answers the game's renderer got while one of our proxies was being dispatched on this thread.
+struct ProbeProxyLight {
+    bool       active{};
+    ::BlockPos cell;
+    int        queries{};
+    int        dark{};
+    int        selfDark{};
+};
+thread_local ProbeProxyLight tProbeProxyLight;
 
 // Every line starts with the frame counter and the level tick.
 template <class... Args>
@@ -1270,6 +1440,54 @@ void probeLineLocked(char const* format, Args... args) {
     if (body <= 0) return;
     auto const length = std::min<std::size_t>(static_cast<std::size_t>(head + body), sizeof(text) - 1);
     gProbeBuffer.append(text, length);
+}
+
+// True while a line class still has budget; its first refusal writes one "cap reached" line. Caller holds gProbeMutex.
+bool probeBudget(std::atomic<uint64_t>& used, uint64_t cap, char const* what) {
+    auto const n = used.fetch_add(1, std::memory_order_relaxed);
+    if (n < cap) return true;
+    if (n == cap) probeLineLocked("cap reached at %s\n", what);
+    return false;
+}
+
+// Closes the open double-draw episode of a cell and writes one line for it. Caller holds gProbeMutex.
+void probeCloseDupLocked(::BlockPos const& pos, ProbeCell& cell) {
+    if (cell.dupFrames == 0) return;
+    auto const ms = std::chrono::duration<double, std::milli>(cell.dupLastWall - cell.dupStartWall).count();
+    gProbe.dupEpisodes.fetch_add(1, std::memory_order_relaxed);
+    gProbe.dupMs.fetch_add(static_cast<uint64_t>(ms), std::memory_order_relaxed);
+    gProbe.dupVisFrames.fetch_add(static_cast<uint64_t>(cell.dupVis), std::memory_order_relaxed);
+    if (static_cast<uint64_t>(cell.dupFrames) > gProbe.dupMaxFrames.load(std::memory_order_relaxed))
+        gProbe.dupMaxFrames.store(static_cast<uint64_t>(cell.dupFrames), std::memory_order_relaxed);
+    static std::atomic<uint64_t> used{0};
+    if (probeBudget(used, 300, "dupEnd")) {
+        probeLineLocked(
+            "dupEnd cell=%d,%d,%d who=%s state=%s frames=%d vis=%d spanMs=%.1f startOff=%.3f endOff=%.3f world=%s "
+            "created=%llu built=%llu kind=%d commit=%llu regress=%llu start=%llu\n",
+            pos.x,
+            pos.y,
+            pos.z,
+            cell.dupWho ? cell.dupWho : "?",
+            cell.dupState ? cell.dupState : "?",
+            cell.dupFrames,
+            cell.dupVis,
+            ms,
+            static_cast<double>(cell.dupStartOff),
+            static_cast<double>(cell.dupEndOff),
+            cell.dupWorld.c_str(),
+            static_cast<unsigned long long>(cell.createdFrame),
+            static_cast<unsigned long long>(cell.builtFrame),
+            cell.builtKind,
+            static_cast<unsigned long long>(cell.meshCommit),
+            static_cast<unsigned long long>(cell.regressFrame),
+            static_cast<unsigned long long>(cell.dupStart)
+        );
+    }
+    cell.dupFrames = 0;
+    cell.dupVis    = 0;
+    cell.dupWho    = nullptr;
+    cell.dupState  = nullptr;
+    cell.dupWorld.clear();
 }
 
 void probeFlushLocked() {
@@ -1290,6 +1508,8 @@ void probeOpen() {
     gProbeRemesh.clear();
     gProbeArm.clear();
     gProbeArmCells.clear();
+    gProbeDrawSeen = false;
+    gProbeClkValid = false;
     gProbeGhosts.clear();
     gProbeBuilt.clear();
     gProbeOrigins.clear();
@@ -1365,13 +1585,43 @@ void probeProxyRendered(::BlockPos const& cell) {
 }
 
 // getDrawPos was reached for the proxy.
-void probeProxyDrawPos(::BlockPos const& cell, float offset) {
+void probeProxyDrawPos(::BlockPos const& cell, float offset, ::Vec3 const* vec) {
     if (gProbePerfOnly.load(std::memory_order_relaxed)) return;
     std::lock_guard const guard(gProbeMutex);
     auto&                 tally = gProbeTally[cell];
     ++tally.drawPos;
     tally.minOffset = std::min(tally.minOffset, offset);
     tally.maxOffset = std::max(tally.maxOffset, offset);
+    if (vec) {
+        tally.vx = vec->x;
+        tally.vy = vec->y;
+        tally.vz = vec->z;
+        // visualDrawOffset stored the time it just used on this thread.
+        auto const time = gLastVisualTime.load(std::memory_order_relaxed);
+        // Every positioned draw of a frame should use the same visual time.
+        if (gProbeDrawSeen && std::fabs(time - gProbeDrawTime) > 0.02)
+            gProbe.clkSpread.fetch_add(1, std::memory_order_relaxed);
+        if (!gProbeDrawSeen) {
+            gProbeDrawSeen = true;
+            gProbeDrawWall = std::chrono::steady_clock::now();
+            gProbeDrawTime = time;
+        }
+        tally.time  = time;
+        tally.timed = true;
+    }
+}
+
+// The renderer is done with the proxy of `cell`: folds the light answers it got meanwhile into the frame's tally.
+void probeProxyLightEnd(::BlockPos const& cell) {
+    auto const seen         = tProbeProxyLight;
+    tProbeProxyLight.active = false;
+    if (seen.queries == 0 || gProbePerfOnly.load(std::memory_order_relaxed)) return;
+    std::lock_guard const guard(gProbeMutex);
+    auto&                 tally = gProbeTally[cell];
+    tally.lightQ         += seen.queries;
+    tally.lightDark      += seen.dark;
+    tally.lightSelfDark  += seen.selfDark;
+    gProbe.lightQueries.fetch_add(static_cast<uint64_t>(seen.queries), std::memory_order_relaxed);
 }
 
 // The game's instance of a managed cell was skipped.
@@ -1547,6 +1797,7 @@ void probeGoneEnd(::BlockPos const& cell, uint64_t action, int64_t ticks, uint64
 }
 
 char const* probeStateName(PushState state);
+float        armValue(PistonVisual const& visual, double time);
 
 // Called under gAnimMutex (then gProbeMutex). Only the first 200 replacements are logged.
 void probeCellReplaced(::BlockPos const& cell, uint64_t oldAction, PushState oldState, uint64_t newAction) {
@@ -2330,6 +2581,7 @@ void probeMeshCommitted(::RenderChunkGeometry const* geometry) {
         ++cell.followCommits;
         if (std::any_of(built.begin(), built.end(), [&](ProbeBuilt const& b) { return b.pos == pos; })) continue;
         cell.meshVerified = false;
+        cell.regressFrame = frame;
         gProbe.meshRegress.fetch_add(1, std::memory_order_relaxed);
     }
     for (auto const& entry : built) {
@@ -2513,7 +2765,11 @@ void probeFrameEnd() {
         if (calls > gProbe.rbeMax[pass].load(std::memory_order_relaxed))
             gProbe.rbeMax[pass].store(calls, std::memory_order_relaxed);
     }
-    std::erase_if(gProbeCells, [](auto const& entry) { return !gCells.contains(entry.first); });
+    std::erase_if(gProbeCells, [](auto& entry) {
+        if (gCells.contains(entry.first)) return false;
+        probeCloseDupLocked(entry.first, entry.second);
+        return true;
+    });
     gProbeAnyCell.store(!gProbeCells.empty(), std::memory_order_relaxed);
     for (auto it = gProbeCleared.begin(); it != gProbeCleared.end();) {
         if (frame - it->second.frame < 120) {
@@ -2554,9 +2810,12 @@ void probeFrameEnd() {
     for (auto const& [pos, rec] : gCells) {
         auto& cell = gProbeCells[pos];
         if (cell.action != rec.action) {
+            probeCloseDupLocked(pos, cell);
             cell        = ProbeCell{};
             cell.action = rec.action;
         }
+        // An episode that was not continued on the previous frame is over.
+        if (cell.dupFrames > 0 && cell.dupLastFrame + 1 < frame) probeCloseDupLocked(pos, cell);
         auto const state  = rec.timeline.state();
         auto const drawer = drawerOf(rec, frame);
         if (!cell.haveDrawer || cell.drawer != drawer) {
@@ -2769,6 +3028,113 @@ void probeFrameEnd() {
         bool const        meshOn     = cell.meshVerified && cell.meshCommit < frame;
         char const* const stateName  = probeStateName(state);
 
+        // Pre-arrival checks on a proxy that is still on its way: is it placed, does it move smoothly, is it lit.
+        if (state == PushState::Animating && proxyDrawn) {
+            gProbe.animCellFrames.fetch_add(1, std::memory_order_relaxed);
+            if (!tally.timed) {
+                gProbe.unpositioned.fetch_add(1, std::memory_order_relaxed);
+                static std::atomic<uint64_t> used{0};
+                if (cell.unposLogged < 1 && probeBudget(used, 100, "unpositioned")) {
+                    ++cell.unposLogged;
+                    probeLineLocked(
+                        "unpositioned cell=%d,%d,%d act=%llu drawer=%s dispatched=%d rendered=%d drawPos=%d\n",
+                        pos.x,
+                        pos.y,
+                        pos.z,
+                        static_cast<unsigned long long>(rec.action),
+                        drawer == PushDrawer::Mesh ? "mesh" : "proxy",
+                        tally.dispatched,
+                        tally.rendered,
+                        tally.drawPos
+                    );
+                }
+            } else {
+                if (cell.havePos && cell.lastPosFrame + 1 == frame) {
+                    gProbe.posChecks.fetch_add(1, std::memory_order_relaxed);
+                    double const dt = tally.time - cell.lastTime;
+                    auto const   dx = static_cast<double>(tally.vx - cell.lastX);
+                    auto const   dy = static_cast<double>(tally.vy - cell.lastY);
+                    auto const   dz = static_cast<double>(tally.vz - cell.lastZ);
+                    double const dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+                    auto const   rate = [](core::Segment const& s) {
+                        return s.length > 0.0 ? std::fabs(static_cast<double>(s.to - s.from)) / s.length : 0.0;
+                    };
+                    double speed = rate(rec.visual.segment);
+                    if (rec.carry) speed += rate(rec.carry->visual.segment);
+                    double const expected = speed * std::max(dt, 0.0);
+                    auto const   magNow   = std::sqrt(
+                        static_cast<double>(tally.vx) * tally.vx + static_cast<double>(tally.vy) * tally.vy
+                        + static_cast<double>(tally.vz) * tally.vz
+                    );
+                    auto const magLast = std::sqrt(
+                        static_cast<double>(cell.lastX) * cell.lastX + static_cast<double>(cell.lastY) * cell.lastY
+                        + static_cast<double>(cell.lastZ) * cell.lastZ
+                    );
+                    char const* kind = nullptr;
+                    if (dist > 2.0 * expected + 0.03) {
+                        kind = "jump";
+                        gProbe.posJump.fetch_add(1, std::memory_order_relaxed);
+                    } else if (!rec.carry && dt > 1.0e-4 && magNow > magLast + 0.02) {
+                        kind = "back";
+                        gProbe.posBack.fetch_add(1, std::memory_order_relaxed);
+                    }
+                    static std::atomic<uint64_t> used{0};
+                    if (kind && cell.stepLogged < 3 && probeBudget(used, 200, "posStep")) {
+                        ++cell.stepLogged;
+                        probeLineLocked(
+                            "posStep cell=%d,%d,%d kind=%s act=%llu dist=%.3f expected=%.3f dt=%.4f magLast=%.3f "
+                            "magNow=%.3f time=%.3f carry=%d mesh=%d\n",
+                            pos.x,
+                            pos.y,
+                            pos.z,
+                            kind,
+                            static_cast<unsigned long long>(rec.action),
+                            dist,
+                            expected,
+                            dt,
+                            magLast,
+                            magNow,
+                            tally.time,
+                            rec.carry ? 1 : 0,
+                            meshOn ? 1 : 0
+                        );
+                    }
+                }
+                cell.lastX       = tally.vx;
+                cell.lastY       = tally.vy;
+                cell.lastZ       = tally.vz;
+                cell.lastTime    = tally.time;
+                cell.lastPosFrame = frame;
+                cell.havePos     = true;
+            }
+            if (tally.lightQ > 0) {
+                int const sig = 1 + ((tally.lightDark > 0 ? 1 : 0) | (tally.lightSelfDark > 0 ? 2 : 0));
+                gProbe.lightFrames.fetch_add(1, std::memory_order_relaxed);
+                if (tally.lightDark > 0) gProbe.lightAnyDark.fetch_add(1, std::memory_order_relaxed);
+                if (tally.lightSelfDark > 0) gProbe.lightSelfDark.fetch_add(1, std::memory_order_relaxed);
+                if (cell.lastLightSig >= 0 && cell.lastLightFrame + 1 == frame && sig != cell.lastLightSig) {
+                    gProbe.lightFlip.fetch_add(1, std::memory_order_relaxed);
+                    static std::atomic<uint64_t> used{0};
+                    if (probeBudget(used, 150, "lightFlip"))
+                        probeLineLocked(
+                            "lightFlip cell=%d,%d,%d act=%llu prev=%d now=%d q=%d dark=%d selfDark=%d off=%.3f\n",
+                            pos.x,
+                            pos.y,
+                            pos.z,
+                            static_cast<unsigned long long>(rec.action),
+                            cell.lastLightSig,
+                            sig,
+                            tally.lightQ,
+                            tally.lightDark,
+                            tally.lightSelfDark,
+                            static_cast<double>(tally.maxOffset)
+                        );
+                }
+                cell.lastLightSig   = sig;
+                cell.lastLightFrame = frame;
+            }
+        }
+
         if (proxyDrawn) {
             gProbe.proxyDraws.fetch_add(1, std::memory_order_relaxed);
             if (!cell.firstRender) {
@@ -2828,6 +3194,7 @@ void probeFrameEnd() {
 
         if (!proxyDrawn && tally.vanilla == 0 && !meshOn) {
             gProbe.zero.fetch_add(1, std::memory_order_relaxed);
+            if (state == PushState::Animating) gProbe.zeroAnim.fetch_add(1, std::memory_order_relaxed);
             if (cell.zeroLogged++ < 3)
                 probeLineLocked(
                     "zero cell=%d,%d,%d state=%s act=%llu drawer=%s dispatched=%d rendered=%d drawPos=%d\n",
@@ -2875,6 +3242,23 @@ void probeFrameEnd() {
         else if (meshOn && tally.vanilla >= 1) who = "mesh+vanilla";
         if (!who) continue;
         gProbe.doubled.fetch_add(1, std::memory_order_relaxed);
+        {
+            auto const now = std::chrono::steady_clock::now();
+            if (cell.dupFrames == 0) {
+                cell.dupStart     = frame;
+                cell.dupStartOff  = tally.maxOffset;
+                cell.dupStartWall = now;
+                cell.dupWho       = who;
+                cell.dupState     = stateName;
+                auto const world  = airAt.find(pos);
+                cell.dupWorld     = world != airAt.end() ? world->second.block->getTypeName() : std::string("?");
+            }
+            ++cell.dupFrames;
+            cell.dupLastFrame = frame;
+            cell.dupLastWall  = now;
+            cell.dupEndOff    = tally.maxOffset;
+            if (tally.maxOffset > 0.1f) ++cell.dupVis;
+        }
         auto const episodeFrames = ++cell.doubleLogged;
         if (episodeFrames > 3 && episodeFrames != 8 && episodeFrames != 16 && episodeFrames != 32
             && episodeFrames != 64)
@@ -2935,9 +3319,29 @@ void probeFrameEnd() {
 
             bool const active = cell.lastActiveFrame == logFrame;
             bool const tail   = !active && logFrame - cell.lastActiveFrame <= 20;
+            // Length of the gap just closed: frames the head was missing before it drew again.
+            if (arm.drawn > 0 && cell.gapStart >= 0) {
+                auto const len = logFrame - cell.gapStart;
+                gProbe.armGapLen[len <= 1 ? 0 : len == 2 ? 1 : len <= 5 ? 2 : len <= 20 ? 3 : 4].fetch_add(
+                    1,
+                    std::memory_order_relaxed
+                );
+                cell.gapStart = -1;
+            }
             if (active || tail) {
                 if (arm.drawn == 0 && cell.lastDrawnFrame == logFrame - 1) {
                     gProbe.armGap.fetch_add(1, std::memory_order_relaxed);
+                    cell.gapStart = logFrame;
+                    if (active) {
+                        // Gone while the head still had a way to go: visible as a vanishing head, not a settling one.
+                        if (auto const visual = gPistonVisuals.find(pos); visual != gPistonVisuals.end()) {
+                            auto const left = std::fabs(
+                                armValue(visual->second, gLastVisualTime.load(std::memory_order_relaxed))
+                                - visual->second.current.to
+                            );
+                            if (left > 0.05f) gProbe.armGapMid.fetch_add(1, std::memory_order_relaxed);
+                        }
+                    }
                     if (logFrame - cell.lastLogFrame >= 20) {
                         cell.lastLogFrame = logFrame;
                         probeLineLocked(
@@ -2978,6 +3382,41 @@ void probeFrameEnd() {
         }
         gProbeArm.clear();
     }
+    // The visual clock against the wall clock: does the proxy time advance by what really passed?
+    if (gProbeDrawSeen) {
+        if (gProbeClkValid) {
+            auto const wall     = std::chrono::duration<double>(gProbeDrawWall - gProbeClkWall).count();
+            auto const advance  = gProbeDrawTime - gProbeClkTime;
+            auto const expected = wall * gProbeClkRate;
+            if (wall > 0.0 && wall < 0.25) {
+                gProbe.clkChecks.fetch_add(1, std::memory_order_relaxed);
+                auto const err = std::fabs(advance - expected);
+                int const  bin = err < 0.02 ? 0 : err < 0.05 ? 1 : err < 0.1 ? 2 : err < 0.25 ? 3 : err < 0.5 ? 4 : err < 0.9 ? 5 : 6;
+                gProbe.clkErr[bin].fetch_add(1, std::memory_order_relaxed);
+                bool const back  = advance < -0.001;
+                bool const stall = !back && advance < 0.001 && expected > 0.05;
+                if (back) gProbe.clkBack.fetch_add(1, std::memory_order_relaxed);
+                if (stall) gProbe.clkStall.fetch_add(1, std::memory_order_relaxed);
+                static std::atomic<uint64_t> used{0};
+                if ((back || stall || err >= 0.5) && probeBudget(used, 200, "clkStep"))
+                    probeLineLocked(
+                        "clkStep kind=%s advance=%.3f expected=%.3f wallMs=%.2f rate=%.2f time=%.3f lt=%lld\n",
+                        back ? "back" : stall ? "stall" : "err",
+                        advance,
+                        expected,
+                        wall * 1000.0,
+                        gProbeClkRate,
+                        gProbeDrawTime,
+                        static_cast<long long>(gFrameLt.load(std::memory_order_relaxed))
+                    );
+            }
+        }
+        gProbeClkValid = true;
+        gProbeClkWall  = gProbeDrawWall;
+        gProbeClkTime  = gProbeDrawTime;
+        gProbeClkRate  = gTicksPerSecond.load(std::memory_order_relaxed);
+    }
+    gProbeDrawSeen = false;
     gProbeTally.clear();
     probeFlushLocked();
 }
@@ -3102,6 +3541,9 @@ void probeFlushArmTally() {
     add(gPerfCounts.armSkipped, tArmTally.skipped);
     add(gPerfCounts.armOffsets, tArmTally.offsets);
     add(gPerfCounts.armShifted, tArmTally.shifted);
+    gPerfCounts2.clockCalls.fetch_add(tClockCalls, std::memory_order_relaxed);
+    gPerfCounts2.clockFrames.fetch_add(1, std::memory_order_relaxed);
+    tClockCalls = 0;
 }
 
 uint32_t probePercentile(std::vector<uint32_t> const& sorted, double q) {
@@ -3207,6 +3649,68 @@ void probeExtraLocked() {
         take(gPerfCounts.bumpForget),
         take(gPerfCounts.viewEntries)
     );
+    for (int slot = 0; slot < kPerfSlots; ++slot) {
+        auto const builds = gPerfCounts2.viewBy[slot].exchange(0, std::memory_order_relaxed);
+        auto const ticks  = gPerfCounts2.viewByTicks[slot].exchange(0, std::memory_order_relaxed);
+        auto const items  = gPerfCounts2.viewByEntries[slot].exchange(0, std::memory_order_relaxed);
+        if (builds == 0) continue;
+        probeLineLocked(
+            "viewBy caller=%s builds=%llu us=%llu entries=%llu\n",
+            slot == kPerfSlots - 1 ? "none" : kPerfNames[slot],
+            static_cast<unsigned long long>(builds),
+            static_cast<unsigned long long>(ticks * 1000000ull / static_cast<uint64_t>(frequency)),
+            static_cast<unsigned long long>(items)
+        );
+    }
+    probeLineLocked(
+        "perf2 meshPubs=%llu meshPubEntries=%llu sweepCalls=%llu sweepIdle=%llu sweepLocked=%llu sweepAdvanced=%llu "
+        "sweepCells=%llu rebuildCalls=%llu rebuildCells=%llu rebuildSubchunks=%llu stepCalls=%llu pruneRuns=%llu "
+        "pruneScanned=%llu pruneErased=%llu clockCalls=%llu clockFrames=%llu scanWindow=%llu scanNoAttached=%llu "
+        "scanAttSettled=%llu look=%llu/%llu/%llu/%llu hit=%llu/%llu/%llu/%llu hitLineOnly=%llu\n",
+        take(gPerfCounts2.meshPubs),
+        take(gPerfCounts2.meshPubEntries),
+        take(gPerfCounts2.sweepCalls),
+        take(gPerfCounts2.sweepIdle),
+        take(gPerfCounts2.sweepLocked),
+        take(gPerfCounts2.sweepAdvanced),
+        take(gPerfCounts2.sweepCells),
+        take(gPerfCounts2.rebuildCalls),
+        take(gPerfCounts2.rebuildCells),
+        take(gPerfCounts2.rebuildSubchunks),
+        take(gPerfCounts2.stepCalls),
+        take(gPerfCounts2.pruneRuns),
+        take(gPerfCounts2.pruneScanned),
+        take(gPerfCounts2.pruneErased),
+        take(gPerfCounts2.clockCalls),
+        take(gPerfCounts2.clockFrames),
+        take(gPerfCounts2.scanWindow),
+        take(gPerfCounts2.scanNoAttached),
+        take(gPerfCounts2.scanAttSettled),
+        take(gPerfCounts2.scanLookRole[0]),
+        take(gPerfCounts2.scanLookRole[1]),
+        take(gPerfCounts2.scanLookRole[2]),
+        take(gPerfCounts2.scanLookRole[3]),
+        take(gPerfCounts2.scanHitRole[0]),
+        take(gPerfCounts2.scanHitRole[1]),
+        take(gPerfCounts2.scanHitRole[2]),
+        take(gPerfCounts2.scanHitRole[3]),
+        take(gPerfCounts2.scanHitLineOnly)
+    );
+    // Sampled one call in kLightSample; ns per call, game function and our wrapper separately.
+    for (int kind = 0; kind < 2; ++kind) {
+        auto const seen = gPerfCounts2.lightSeen[kind].exchange(0, std::memory_order_relaxed);
+        auto const game = gPerfCounts2.lightGameTicks[kind].exchange(0, std::memory_order_relaxed);
+        auto const own  = gPerfCounts2.lightOwnTicks[kind].exchange(0, std::memory_order_relaxed);
+        if (seen == 0) continue;
+        auto const toNs = 1.0e9 / (frequency * static_cast<double>(seen));
+        probeLineLocked(
+            "light %s sampled=%llu gameNs=%.1f ownNs=%.1f\n",
+            kind == 0 ? "render" : "other",
+            static_cast<unsigned long long>(seen),
+            static_cast<double>(game) * toNs,
+            static_cast<double>(own) * toNs
+        );
+    }
 }
 
 // Every real frame on the render thread, after onFrameEnd returned so its Frame scope is in the work total.
@@ -3284,6 +3788,48 @@ void probeRealFrameEnd() {
             probeCount(gProbe.innerHidden),
             probeCount(gProbe.actorStripped)
         );
+        // Pre-arrival flicker counters (cumulative, like the sum line).
+        probeLineLocked(
+            "flicker animCellFrames=%llu zeroAnim=%llu unpositioned=%llu dupEpisodes=%llu dupMs=%llu "
+            "dupMaxFrames=%llu dupVisFrames=%llu posChecks=%llu posJump=%llu posBack=%llu armGapMid=%llu "
+            "armGapLen=%llu/%llu/%llu/%llu/%llu clkChecks=%llu clkBack=%llu clkStall=%llu clkSpread=%llu "
+            "clkErr=%llu/%llu/%llu/%llu/%llu/%llu/%llu lightQueries=%llu lightFrames=%llu lightAnyDark=%llu "
+            "lightSelfDark=%llu lightFlip=%llu lightSelfFixed=%llu lightSelfNoMem=%llu\n",
+            probeCount(gProbe.animCellFrames),
+            probeCount(gProbe.zeroAnim),
+            probeCount(gProbe.unpositioned),
+            probeCount(gProbe.dupEpisodes),
+            probeCount(gProbe.dupMs),
+            probeCount(gProbe.dupMaxFrames),
+            probeCount(gProbe.dupVisFrames),
+            probeCount(gProbe.posChecks),
+            probeCount(gProbe.posJump),
+            probeCount(gProbe.posBack),
+            probeCount(gProbe.armGapMid),
+            probeCount(gProbe.armGapLen[0]),
+            probeCount(gProbe.armGapLen[1]),
+            probeCount(gProbe.armGapLen[2]),
+            probeCount(gProbe.armGapLen[3]),
+            probeCount(gProbe.armGapLen[4]),
+            probeCount(gProbe.clkChecks),
+            probeCount(gProbe.clkBack),
+            probeCount(gProbe.clkStall),
+            probeCount(gProbe.clkSpread),
+            probeCount(gProbe.clkErr[0]),
+            probeCount(gProbe.clkErr[1]),
+            probeCount(gProbe.clkErr[2]),
+            probeCount(gProbe.clkErr[3]),
+            probeCount(gProbe.clkErr[4]),
+            probeCount(gProbe.clkErr[5]),
+            probeCount(gProbe.clkErr[6]),
+            probeCount(gProbe.lightQueries),
+            probeCount(gProbe.lightFrames),
+            probeCount(gProbe.lightAnyDark),
+            probeCount(gProbe.lightSelfDark),
+            probeCount(gProbe.lightFlip),
+            probeCount(gProbe.lightSelfFixed),
+            probeCount(gProbe.lightSelfNoMem)
+        );
         probeLineLocked(
             "builds starts=%llu commits=%llu asks=%llu askCells=%llu approachHidden=%llu staleFlag=%llu "
             "staleAsk=%llu awaitFlag=%llu landReask=%llu cleanCommit=%llu\n",
@@ -3323,12 +3869,11 @@ void probeRealFrameEnd() {
             probeCount(gProbeGone[0]),
             probeCount(gProbeGone[1])
         );
-        std::size_t headOwners = 0;
-        std::size_t stepped    = 0;
+        std::size_t const headOwners = gProbeHeadOwners.load(std::memory_order_relaxed);
+        std::size_t       stepped    = 0;
         {
             std::lock_guard const heads(gHeadMutex);
-            headOwners = gHeadOwners.size();
-            stepped    = gSteppedPistons.size();
+            stepped = gSteppedPistons.size();
         }
         probeLineLocked(
             "scale seconds=%.2f cells=%llu pistons=%llu actions=%llu headOwners=%zu stepped=%zu scanPistons=%llu "
@@ -3352,12 +3897,19 @@ void probeRealFrameEnd() {
 #endif
 
 // An external clock (e.g. a replay) wins; in a live world the client level tick runs 1:1 with redstone.
-std::optional<core::ClockSample> visualClock() {
+std::optional<core::ClockSample> sampleVisualClock() {
+    OPTIPISTON_PROBE_DO(++tClockCalls;)
     if (auto external = core::externalClock().sample()) return external;
     auto  client = ll::service::getClientInstance();
     auto* player = client ? client->getLocalPlayer() : nullptr;
     if (!player) return std::nullopt;
     return core::ClockSample{static_cast<int64_t>(player->getLevel().getCurrentTick().tickID), 0, false};
+}
+
+// Inside a render pass the clock is sampled once and shared by every arm of the pass.
+std::optional<core::ClockSample> visualClock() {
+    if (tRenderScope) return tRenderScope->clock(sampleVisualClock);
+    return sampleVisualClock();
 }
 
 std::optional<int64_t> visualClockTick() {
@@ -3462,11 +4014,37 @@ void endActionLocked(uint64_t action) {
 // Set while our own re-mesh requests pass through the level listeners.
 thread_local bool tImmediateRebuild = false;
 
+#if OPTIPISTON_PROBE
+// Cells per call, and how many distinct subchunks their +-1 boxes touch: the ceiling for merging asks per subchunk.
+void probeRebuildShape(std::vector<::BlockPos> const& cells) {
+    if (cells.empty()) return;
+    thread_local std::vector<std::uint64_t> chunks;
+    chunks.clear();
+    for (auto const& pos : cells)
+        for (int corner = 0; corner < 8; ++corner) {
+            auto const x = (pos.x + ((corner & 1) ? 1 : -1)) >> 4;
+            auto const y = (pos.y + ((corner & 2) ? 1 : -1)) >> 4;
+            auto const z = (pos.z + ((corner & 4) ? 1 : -1)) >> 4;
+            chunks.push_back(
+                (static_cast<std::uint64_t>(static_cast<std::uint32_t>(x) & 0x1FFFFF) << 42)
+                | (static_cast<std::uint64_t>(static_cast<std::uint32_t>(y) & 0x1FFFFF) << 21)
+                | (static_cast<std::uint64_t>(static_cast<std::uint32_t>(z) & 0x1FFFFF))
+            );
+        }
+    std::sort(chunks.begin(), chunks.end());
+    auto const distinct = static_cast<std::uint64_t>(std::unique(chunks.begin(), chunks.end()) - chunks.begin());
+    gPerfCounts2.rebuildCalls.fetch_add(1, std::memory_order_relaxed);
+    gPerfCounts2.rebuildCells.fetch_add(cells.size(), std::memory_order_relaxed);
+    gPerfCounts2.rebuildSubchunks.fetch_add(distinct, std::memory_order_relaxed);
+}
+#endif
+
 void rebuildCells(::BlockSource& region, std::vector<::BlockPos> const& cells) {
     OPTIPISTON_PROBE_DO(if (!cells.empty()) {
         gProbe.rebuildAsks.fetch_add(1, std::memory_order_relaxed);
         gProbe.askCells.fetch_add(cells.size(), std::memory_order_relaxed);
     })
+    OPTIPISTON_PROBE_DO(probeRebuildShape(cells);)
     tImmediateRebuild = true;
     // Neighbours kept faces against the hidden block and may sit in another subchunk.
     for (auto const& pos : cells) fireAreaChanged(region, pos - ::BlockPos{1, 1, 1}, pos + ::BlockPos{1, 1, 1});
@@ -3519,6 +4097,7 @@ void reapLocked(int64_t tick, Graveyard& drop) {
 void advanceTickLocked(std::vector<::BlockPos>& cells, Graveyard& drop, ::BlockSource& region) {
     auto const tick = visualClockTick().value_or(0);
     if (!gClockTracker.advance(tick)) return;
+    OPTIPISTON_PROBE_DO(gPerfCounts2.sweepAdvanced.fetch_add(1, std::memory_order_relaxed);)
     gLastTick.store(tick, std::memory_order_relaxed);
     foldActorNotesLocked();
     auto const expired = [tick](VisualSegment const& segment) { return core::segmentExpired(segment, tick); };
@@ -3559,8 +4138,12 @@ void advanceTickLocked(std::vector<::BlockPos>& cells, Graveyard& drop, ::BlockS
 
 // Ends visuals past their duration, or ahead of the clock after a backward seek.
 void sweepActions(::BlockSource& region) {
+    OPTIPISTON_PROBE_DO(gPerfCounts2.sweepCalls.fetch_add(1, std::memory_order_relaxed);)
     // Nothing to end, re-mesh or free in an idle world.
-    if (!gStateWatch.load(std::memory_order_relaxed) && !gPendingWatch.load(std::memory_order_relaxed)) return;
+    if (!gStateWatch.load(std::memory_order_relaxed) && !gPendingWatch.load(std::memory_order_relaxed)) {
+        OPTIPISTON_PROBE_DO(gPerfCounts2.sweepIdle.fetch_add(1, std::memory_order_relaxed);)
+        return;
+    }
     // Declared first, so the proxies die after the lock is released.
     Graveyard               drop;
     std::vector<::BlockPos> cleared;
@@ -3568,6 +4151,7 @@ void sweepActions(::BlockSource& region) {
     std::vector<::BlockPos> ticked;
     {
         std::lock_guard const guard(gAnimMutex);
+        OPTIPISTON_PROBE_DO(gPerfCounts2.sweepLocked.fetch_add(1, std::memory_order_relaxed);)
         bool const            active = animationActive();
         if ((!active || clockInvalidatedLocked()) && hasAnimationStateLocked())
             cleared = clearAnimationStateLocked(drop);
@@ -3577,6 +4161,9 @@ void sweepActions(::BlockSource& region) {
             if (animationActive()) advanceTickLocked(ticked, drop, region);
         }
     }
+    OPTIPISTON_PROBE_DO(
+        gPerfCounts2.sweepCells.fetch_add(cleared.size() + pending.size() + ticked.size(), std::memory_order_relaxed);
+    )
     if (!cleared.empty()) {
         rebuildCells(region, cleared);
         return;
@@ -4350,6 +4937,7 @@ void scanTargets(::BlockSource& region) {
     // Reused across frames, so a steady scan allocates nothing.
     thread_local std::vector<::BlockPos> candidates;
     thread_local std::vector<NewProxy>   made;
+    OPTIPISTON_PROBE_DO(thread_local std::vector<std::uint8_t> roles;)
     ViewPin                              pin;
     auto const&                          state = pin.get();
     auto const                           now   = visualClockTick().value_or(gLastTick.load(std::memory_order_relaxed));
@@ -4363,14 +4951,21 @@ void scanTargets(::BlockSource& region) {
         if (live == state.actions.end()) continue;
         auto const& facing = live->second.facing;
         candidates.clear();
+        OPTIPISTON_PROBE_DO(
+            roles.clear(); std::uint8_t role = 0; uint64_t attPushed = 0;
+            gPerfCounts2.scanWindow.fetch_add(1, std::memory_order_relaxed);
+            if (!piston.attached) gPerfCounts2.scanNoAttached.fetch_add(1, std::memory_order_relaxed);
+        )
         auto const add = [&](::BlockPos const& cell) {
             if (auto const known = state.cells.find(cell);
                 known != state.cells.end() && known->second.action == piston.action) {
                 OPTIPISTON_PROBE_DO(++nKnown;)
                 return;
             }
-            if (std::find(candidates.begin(), candidates.end(), cell) == candidates.end()) candidates.push_back(cell);
-            else {
+            if (std::find(candidates.begin(), candidates.end(), cell) == candidates.end()) {
+                candidates.push_back(cell);
+                OPTIPISTON_PROBE_DO(roles.push_back(role); attPushed += role != 0;)
+            } else {
                 OPTIPISTON_PROBE_DO(++nDupes;)
             }
         };
@@ -4378,14 +4973,24 @@ void scanTargets(::BlockSource& region) {
             add(::BlockPos{pistonPos.x + facing.x * k, pistonPos.y + facing.y * k, pistonPos.z + facing.z * k});
         if (piston.attached) {
             for (auto const& block : *piston.attached) {
+                OPTIPISTON_PROBE_DO(role = 1;)
                 add(block);
+                OPTIPISTON_PROBE_DO(role = 2;)
                 add(block + facing);
+                OPTIPISTON_PROBE_DO(role = 3;)
                 add(block - facing);
             }
         }
+        OPTIPISTON_PROBE_DO(
+            if (piston.attached && attPushed == 0) gPerfCounts2.scanAttSettled.fetch_add(1, std::memory_order_relaxed);
+        )
         OPTIPISTON_PROBE_DO(perf.pause();)
         for (auto const& cell : candidates) {
             OPTIPISTON_PROBE_DO(gProbe.scanLookups.fetch_add(1, std::memory_order_relaxed);)
+            OPTIPISTON_PROBE_DO(
+                auto const lookRole = roles[static_cast<std::size_t>(&cell - candidates.data())];
+                gPerfCounts2.scanLookRole[lookRole].fetch_add(1, std::memory_order_relaxed);
+            )
             auto* const actor = [&] {
                 OPTIPISTON_PROBE_DO(GameSpan lookup(PerfId::ScanLookups);)
                 return region.getBlockEntity(cell);
@@ -4393,7 +4998,10 @@ void scanTargets(::BlockSource& region) {
             if (!actor || actor->mType != ::BlockActorType::MovingBlock) continue;
             auto& moving = *static_cast<::MovingBlockActor*>(actor);
             if (moving.mPistonBlockPos.get() != pistonPos) continue;
-            OPTIPISTON_PROBE_DO(++nHits;)
+            OPTIPISTON_PROBE_DO(
+                ++nHits; gPerfCounts2.scanHitRole[lookRole].fetch_add(1, std::memory_order_relaxed);
+                if (lookRole == 0 && piston.attached) gPerfCounts2.scanHitLineOnly.fetch_add(1, std::memory_order_relaxed);
+            )
             auto const plan = planSnapshot(state.state(), moving);
             if (plan.kind == SnapshotPlan::Kind::Create) {
                 OPTIPISTON_PROBE_DO(++nCreated; perf.resume();)
@@ -4671,13 +5279,20 @@ void drawProxies(::BaseActorRenderContext& context, bool renderAlphaLayer) {
             })
         }
         tProxyDraw = proxy.get();
+#if OPTIPISTON_MC == 2651
+        tProxyLightFix = {true, proxy->mPosition.get(), &rec->shared->lightMemory};
+#endif
         OPTIPISTON_PROBE_DO(
             tProbePass = alphaLayer ? 1 : 0; probeProxyDispatched(proxy->mPosition.get(), tProbePass);
             if (alphaLayer) probeAlphaEarly(proxy->mPosition.get());
+            tProbeProxyLight = ProbeProxyLight{true, proxy->mPosition.get(), 0, 0, 0};
             perf.pause();
         )
         dispatcher.render(context, region, *item, block, alphaLayer, forcedMat, nullptr, 0, {});
-        OPTIPISTON_PROBE_DO(perf.resume();)
+        OPTIPISTON_PROBE_DO(perf.resume(); probeProxyLightEnd(proxy->mPosition.get());)
+#if OPTIPISTON_MC == 2651
+        tProxyLightFix = {};
+#endif
         tProxyDraw = nullptr;
         if (stripped) wrappedActorOf(*proxy).swap(stripped);
     }
@@ -4690,12 +5305,52 @@ constexpr size_t  kHeadPruneAt    = 4096;
 void markPistonStepped(::BlockActor const* piston, int64_t tick) {
     std::lock_guard const guard(gHeadMutex);
     gSteppedPistons[piston] = tick;
-    if (gSteppedPistons.size() > kHeadPruneAt)
+    OPTIPISTON_PROBE_DO(gPerfCounts2.stepCalls.fetch_add(1, std::memory_order_relaxed);)
+    if (gSteppedPistons.size() > kHeadPruneAt) {
+        OPTIPISTON_PROBE_DO(
+            auto const before = gSteppedPistons.size();
+            gPerfCounts2.pruneRuns.fetch_add(1, std::memory_order_relaxed);
+            gPerfCounts2.pruneScanned.fetch_add(before, std::memory_order_relaxed);
+        )
         std::erase_if(gSteppedPistons, [&](auto const& e) { return e.second < tick - kHeadStaleTicks; });
-    if (gHeadOwners.size() > kHeadPruneAt)
-        std::erase_if(gHeadOwners, [&](auto const& e) {
-            return static_cast<int64_t>(e.second.round) < tick - kHeadStaleTicks;
-        });
+        OPTIPISTON_PROBE_DO(
+            gPerfCounts2.pruneErased.fetch_add(before - gSteppedPistons.size(), std::memory_order_relaxed);
+        )
+    }
+}
+
+// The calling thread's election table for this round. A claim is dropped on a module restart through the epoch.
+HeadTable& headTableFor(uint64_t round) {
+    if (!tHeadTable) {
+        auto           table = std::make_unique<HeadTable>();
+        std::lock_guard const guard(gHeadTablesMutex);
+        tHeadTable = table.get();
+        gHeadTables.push_back(std::move(table));
+    }
+    auto&      table = *tHeadTable;
+    auto const epoch = gHeadEpoch.load(std::memory_order_relaxed);
+    if (table.epoch != epoch) {
+        table.owners.clear();
+        table.epoch = epoch;
+    }
+    if (table.round != round) {
+        table.round = round;
+        if (table.owners.size() > kHeadPruneAt) {
+            OPTIPISTON_PROBE_DO(
+                auto const before = table.owners.size();
+                gPerfCounts2.pruneRuns.fetch_add(1, std::memory_order_relaxed);
+                gPerfCounts2.pruneScanned.fetch_add(before, std::memory_order_relaxed);
+            )
+            std::erase_if(table.owners, [&](auto const& e) {
+                return static_cast<int64_t>(e.second.round) < static_cast<int64_t>(round) - kHeadStaleTicks;
+            });
+            OPTIPISTON_PROBE_DO(
+                gPerfCounts2.pruneErased.fetch_add(before - table.owners.size(), std::memory_order_relaxed);
+            )
+        }
+        OPTIPISTON_PROBE_DO(gProbeHeadOwners.store(table.owners.size(), std::memory_order_relaxed);)
+    }
+    return table;
 }
 
 // Piston NBT carries no interlock data, so a client-side piston rebuilt from a block-actor packet would stay
@@ -4873,15 +5528,18 @@ void drawArm(
     // A nested head keeps its carrier's claim when the piston inside is rebuilt.
     auto const* const self = nested && tCarrier ? tCarrier : &entity;
     if (enabled && isArm) {
-        auto const            round = gHeadOwnerRound.load(std::memory_order_relaxed);
-        std::lock_guard const guard(gHeadMutex);
-        // Driving heads outrank cargo, and a piston that advanced mProgress outranks an untouched leftover.
-        int const selfRank = (isCargo ? 0 : 2) + (gSteppedPistons.contains(&entity) ? 1 : 0);
-        auto&     owner    = gHeadOwners[entity.mPosition.get()];
-        if (owner.round != round || owner.actor == nullptr || owner.actor == self || selfRank > owner.rank) {
-            owner = {round, self, selfRank};
+        auto const round = gHeadOwnerRound.load(std::memory_order_relaxed);
+        auto&      owner = headTableFor(round).owners[entity.mPosition.get()];
+        if (owner.round != round || owner.actor == nullptr || owner.actor == self) {
+            owner = {round, self, &entity, isCargo};
         } else {
-            skipZombieHead = true;
+            // Driving heads outrank cargo, and a piston that advanced mProgress outranks an untouched leftover.
+            std::lock_guard const guard(gHeadMutex);
+            auto const rank = [](bool cargo, ::BlockActor const* piston) {
+                return (cargo ? 0 : 2) + (gSteppedPistons.contains(piston) ? 1 : 0);
+            };
+            if (rank(isCargo, &entity) > rank(owner.cargo, owner.claimant)) owner = {round, self, &entity, isCargo};
+            else skipZombieHead = true;
         }
     }
 
@@ -5595,12 +6253,13 @@ LL_TYPE_INSTANCE_HOOK(
         if (auto const offset = visualDrawOffset(*this, a)) {
             OPTIPISTON_PROBE_DO(probeProxyDrawPos(
                                     mPosition.get(),
-                                    std::max({std::abs(offset->x), std::abs(offset->y), std::abs(offset->z)})
+                                    std::max({std::abs(offset->x), std::abs(offset->y), std::abs(offset->z)}),
+                                    &*offset
             );)
             return *offset;
         }
     }
-    OPTIPISTON_PROBE_DO(if (tProxyDraw == this) probeProxyDrawPos(mPosition.get(), 0.0f);)
+    OPTIPISTON_PROBE_DO(if (tProxyDraw == this) probeProxyDrawPos(mPosition.get(), 0.0f, nullptr);)
     OPTIPISTON_PROBE_DO(perf.pause();)
     return origin(region, a);
 }
@@ -5732,8 +6391,9 @@ void removeHook(bool& installed) {
 #ifndef OPTIPISTON_LIGHT_HOOKS
 #define OPTIPISTON_LIGHT_HOOKS 4
 #endif
+// Off by default: its per-call thread-local read would skew the light hook's own cost.
 #ifndef OPTIPISTON_LIGHT_LOG
-#define OPTIPISTON_LIGHT_LOG 1
+#define OPTIPISTON_LIGHT_LOG 0
 #endif
 #if OPTIPISTON_MC >= 2651
 // A user-provided copy constructor makes the compiler return it through a hidden pointer, like the game's BrightnessPair.
@@ -5765,9 +6425,23 @@ LL_TYPE_INSTANCE_HOOK(
     ::BlockPos const& pos,
     std::uint8_t      minBlockLight
 ) {
+    OPTIPISTON_PROBE_DO(
+        thread_local uint32_t sampleSeq = 0;
+        bool const           timed      = ((++sampleSeq) & (kLightSample - 1)) == 0;
+        auto const           gameStart  = timed ? perfNow() : 0ull;
+    )
     LightRet const raw = origin(pos, minBlockLight);
-    LightRet       result = raw;
-    auto const&    fix    = tArmLightFix;
+    OPTIPISTON_PROBE_DO(auto const gameEnd = timed ? perfNow() : 0ull;)
+    OPTIPISTON_PROBE_DO(if (tProbeProxyLight.active) {
+        ++tProbeProxyLight.queries;
+        if (raw.v == 0) {
+            ++tProbeProxyLight.dark;
+            auto const& own = tProbeProxyLight.cell;
+            if (pos.x == own.x && pos.y == own.y && pos.z == own.z) ++tProbeProxyLight.selfDark;
+        }
+    })
+    LightRet    result = raw;
+    auto const& fix    = tArmLightFix;
     if (fix.active && pos.x == fix.head.x && pos.y == fix.head.y && pos.z == fix.head.z) {
         // An opaque cell stores 0/0; any other result is the game's own and stays as it is.
         if (raw.v == 0) result = origin(fix.piston, minBlockLight);
@@ -5776,6 +6450,20 @@ LL_TYPE_INSTANCE_HOOK(
             if (raw.v == 0) gLightFixRawDark.fetch_add(1, std::memory_order_relaxed);
             if (result.v != raw.v) gLightFixRewrites.fetch_add(1, std::memory_order_relaxed);
         )
+    }
+    // A proxy stands in the cell the logic has already settled: once the real block is there the game stores 0/0
+    // for it and the moving copy renders dark. Keep the cell's own last lit answer for the rest of the animation.
+    auto const& proxyFix = tProxyLightFix;
+    if (proxyFix.active && pos.x == proxyFix.cell.x && pos.y == proxyFix.cell.y && pos.z == proxyFix.cell.z) {
+        if (raw.v != 0) {
+            proxyFix.memory->store(raw.v, std::memory_order_relaxed);
+        } else if (result.v == 0) {
+            auto const kept = proxyFix.memory->load(std::memory_order_relaxed);
+            if (kept != 0) result.v = kept;
+            OPTIPISTON_PROBE_DO(
+                (kept != 0 ? gProbe.lightSelfFixed : gProbe.lightSelfNoMem).fetch_add(1, std::memory_order_relaxed);
+            )
+        }
     }
     OPTIPISTON_PROBE_DO(
         if (OPTIPISTON_LIGHT_LOG && (OPTIPISTON_LIGHT_HOOKS & 4) && tArmLightCtx.active) {
@@ -5793,6 +6481,12 @@ LL_TYPE_INSTANCE_HOOK(
             );
         }
     )
+    OPTIPISTON_PROBE_DO(if (timed) {
+        auto const kind = tRenderThread ? 0 : 1;
+        gPerfCounts2.lightSeen[kind].fetch_add(1, std::memory_order_relaxed);
+        gPerfCounts2.lightGameTicks[kind].fetch_add(gameEnd - gameStart, std::memory_order_relaxed);
+        gPerfCounts2.lightOwnTicks[kind].fetch_add(perfNow() - gameEnd, std::memory_order_relaxed);
+    })
     return result;
 }
 
@@ -5959,8 +6653,8 @@ bool hookPistonRender(bool enable) {
     {
         std::lock_guard const guard(gHeadMutex);
         gSteppedPistons.clear();
-        gHeadOwners.clear();
     }
+    gHeadEpoch.fetch_add(1, std::memory_order_relaxed);
     clearAnimationState();
     OPTIPISTON_PROBE_DO(probeClose();)
 

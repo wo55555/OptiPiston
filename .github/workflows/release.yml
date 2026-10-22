@@ -81,8 +81,9 @@ jobs:
           xmake repo -u
 
       # Configure checks every tooth.json variant against xmake.lua and syncs the version.
+      # probe defaults on for local diagnosis; published binaries must not include it.
       - run: |
-          xmake f -a x64 -m release -p windows --target_type=client --mc=${{ matrix.mc }} -y
+          xmake f -a x64 -m release -p windows --target_type=client --mc=${{ matrix.mc }} --probe=n --observe=n -y
 
       # Lip installs from the tag, so tooth.json must already be in sync there.
       - shell: pwsh

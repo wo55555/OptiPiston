@@ -1,4 +1,4 @@
-// Stage S0 of the overlay rewrite, observation probes version 2 (r59), for the design in optipiston-design.md.
+// Stage S0 of the overlay rewrite, observation probes version 2, for the design in optipiston-design.md.
 //   P1  promote vs. block-actor draw order and thread (counters + per-period token signature)
 //   P2  does a build read the live chunk or a copy (counters + offset histogram)
 //   P3  geometry pointer / build version reuse
@@ -2538,7 +2538,7 @@ void install() {
         installHook<ObserveUpdateBlockSyncedHook>(gHooked[9]),
         installHook<ObserveQueueEntitiesHook>(gHooked[10]),
     };
-    std::string line = "install observe-v3 r63 shadow diag hooks:";
+    std::string line = "install observe-v3 shadow diag hooks:";
     for (int i = 0; i < kHooks; ++i) app(line, " %d", ok[i] ? 1 : 0);
     rawLog("%s\n", line.c_str());
     rawLog(

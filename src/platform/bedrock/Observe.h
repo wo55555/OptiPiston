@@ -1,6 +1,6 @@
 #pragma once
 
-// Stage S0 of the overlay rewrite: observation probes (observe.log). Version 2 (r59).
+// Stage S0 of the overlay rewrite: observation probes (observe.log). Version 2.
 // Compiled into probe builds, or into observe-only builds (--probe=n --observe=y), of the 26.50 line.
 // Every call below is a no-op elsewhere.
 

@@ -11,6 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Widened the singleplayer world-speed range from 0.1x–10x to 0.01x–100x. New installs step through 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 4, 10, 20, 50, and 100.
 
+### Fixed
+
+- Fixed a piston pulled back by another piston fighting a block pushed into its old cell. The pulled piston no longer takes over the newer block's animation.
+- Fixed a pushed block vanishing for a frame when the chunk rebuild produced no geometry for it yet.
+- Fixed a piston head briefly not drawn when its moving body and the head were claimed in different render frames of the same tick.
+
 ## [0.2.0] - 2026-10-22
 
 > Prerelease for every Minecraft line (26.10, 26.20, 26.30, 26.40, 26.50). Install the variant for your line, for example `lip install github.com/wo55555/OptiPiston#client_mc26_50@0.2.0`. If you installed an earlier `mc26_xx` variant, uninstall it first. The configuration format and C API v1 are unchanged. The render rewrite and both lighting fixes have been tested in game on 26.50 only; the other lines build and pass unit tests.

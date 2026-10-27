@@ -64,7 +64,7 @@ Download `OptiPiston-mc<line>-windows-x64.zip` for your line (for example `OptiP
 - **Smooth piston animation**: Arms and pushed blocks move over 2–4 game ticks, fractions included. Rendering only; game logic keeps its native timing.
 - **Clean hand-off**: A pushed block stays drawn until its real block has been re-meshed, which avoids gaps, ghost copies, and overlap where it lands.
 - **Stable heads**: Each cell draws exactly one piston head, and a piston that is itself being pushed follows its moving body.
-- **World speed**: Runs a singleplayer world at 0.1x–10x, with optional sound pitch and particle scaling.
+- **World speed**: Runs a singleplayer world at 0.01x–100x, with optional sound pitch and particle scaling.
 - **External clock API**: Replay and recording mods can drive the animation clock through a small C API, so pause, seek, and speed changes stay in sync.
 - **Bilingual**: English and Simplified Chinese command output.
 
@@ -76,7 +76,7 @@ Download `OptiPiston-mc<line>-windows-x64.zip` for your line (for example `OptiP
 | `/optipiston piston on`               | Turn piston animation on.                                      |
 | `/optipiston piston off`              | Turn piston animation off.                                     |
 | `/optipiston piston duration <ticks>` | Set the animation length, from `2` to `4` game ticks.          |
-| `/optipiston speed <value>`           | Set world speed, from `0.1` to `10`.                           |
+| `/optipiston speed <value>`           | Set world speed, from `0.01` to `100`.                         |
 | `/optipiston speed next`              | Switch to the next world speed preset.                         |
 | `/optipiston speed prev`              | Switch to the previous world speed preset.                     |
 | `/optipiston speed reset`             | Return to normal speed (`1x`).                                 |
@@ -96,7 +96,7 @@ The configuration lives at `mods/OptiPiston/config/config.json` and is kept acro
         "durationTicks": 4.0
     },
     "worldSpeed": {
-        "presets": [0.1, 0.25, 0.5, 1.0, 2.0, 4.0],
+        "presets": [0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 4.0, 10.0, 20.0, 50.0, 100.0],
         "audio": true,
         "particles": true
     },

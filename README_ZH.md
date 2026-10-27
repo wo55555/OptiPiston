@@ -64,7 +64,7 @@ lip install github.com/wo55555/OptiPiston#client_mc26_20@<version>
 - **平滑活塞动画**：活塞臂和被推方块在 2–4 游戏刻内完成移动，支持小数。仅影响渲染，游戏逻辑保持原生时序。
 - **平滑衔接**：被推方块在真实方块完成重新建网格前持续绘制，避免落位时出现空洞、重影或重叠。
 - **稳定的活塞头**：每格只绘制一个活塞头；被推动的活塞会随其移动中的机身一起绘制。
-- **世界变速**：单人世界以 0.1x–10x 运行，可选同步缩放声音音调和粒子。
+- **世界变速**：单人世界以 0.01x–100x 运行，可选同步缩放声音音调和粒子。
 - **外部时钟 API**：回放、录制类模组可以通过简单的 C API 驱动动画时钟，使暂停、跳转和倍速保持同步。
 - **双语**：命令输出提供英文和简体中文。
 
@@ -76,7 +76,7 @@ lip install github.com/wo55555/OptiPiston#client_mc26_20@<version>
 | `/optipiston piston on`               | 开启活塞动画。                            |
 | `/optipiston piston off`              | 关闭活塞动画。                            |
 | `/optipiston piston duration <ticks>` | 设置动画时长，范围 `2` 到 `4` 游戏刻。    |
-| `/optipiston speed <value>`           | 设置世界速度，范围 `0.1` 到 `10`。        |
+| `/optipiston speed <value>`           | 设置世界速度，范围 `0.01` 到 `100`。      |
 | `/optipiston speed next`              | 切换到下一个世界速度预设。                |
 | `/optipiston speed prev`              | 切换到上一个世界速度预设。                |
 | `/optipiston speed reset`             | 恢复正常速度（`1x`）。                    |
@@ -96,7 +96,7 @@ lip install github.com/wo55555/OptiPiston#client_mc26_20@<version>
         "durationTicks": 4.0
     },
     "worldSpeed": {
-        "presets": [0.1, 0.25, 0.5, 1.0, 2.0, 4.0],
+        "presets": [0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 4.0, 10.0, 20.0, 50.0, 100.0],
         "audio": true,
         "particles": true
     },

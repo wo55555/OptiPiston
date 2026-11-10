@@ -7090,16 +7090,6 @@ constexpr HookEntry kHooks[] = {OPTIPISTON_ALL_HOOKS(OPTIPISTON_HOOK_ENTRY)};
 
 } // namespace
 
-bool observeMark(std::string const& label) {
-#if OPTIPISTON_OBSERVE
-    observe::mark(label);
-    return true;
-#else
-    (void)label;
-    return false;
-#endif
-}
-
 bool hookPistonRender(bool enable) {
     static bool installed[std::size(kHooks)]{};
 

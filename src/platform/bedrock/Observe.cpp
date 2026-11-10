@@ -10,8 +10,7 @@
 //   P9  dirty -> build begin -> commit -> promote latencies (ms and ticks), tracked changes vs. other changes
 //   P10 per-frame cost census, hitch lines with a breakdown of what ran in the period
 //   P11 cause of every block change (packet, moving block tick, piston tick, other)
-//   P14 segments: /optipiston mark <label> closes the segment with summary lines and starts a new one
-// Everything is aggregated per segment; individual lines are limited per category and segment.
+// Everything is aggregated over the whole run, as one segment; individual lines are limited per category.
 #include "platform/bedrock/Observe.h"
 
 #if OPTIPISTON_OBSERVE
@@ -421,7 +420,6 @@ std::mutex gMain;
 
 Seg      gSeg;
 Fr       gFr;
-uint32_t gSegIndex    = 0;
 int64_t  gCurTick     = -1;
 int64_t  gHotTick     = -1;
 int      gLastMode    = -1;
@@ -2882,26 +2880,6 @@ void buildCommit(void const* geometry, uint64_t commitBeginQpc) {
     if (gCommittedPos.size() > 8192) gCommittedPos.clear();
     gCommittedGeom[geometry] = res;
     gCommittedPos[res->pos]  = res;
-}
-
-void mark(std::string const& label) {
-    if (!gOn.load(std::memory_order_relaxed)) return;
-    std::lock_guard const guard(gMain);
-    segPrint("seg");
-    gSeg       = Seg{};
-    gSeg.index = ++gSegIndex;
-    gSeg.label = label;
-    gSeg.f0    = gFrame.load(std::memory_order_relaxed);
-    gSeg.q0    = qpcNow();
-    gSeg.lt0   = gCurTick;
-    rawLog(
-        "mark #%u label=%s piston=%s lt=%lld cells=%zu\n",
-        gSegIndex,
-        label.c_str(),
-        modeName(modeIndex()),
-        static_cast<long long>(gCurTick),
-        gCells.size()
-    );
 }
 
 } // namespace optipiston::platform::observe

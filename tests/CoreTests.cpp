@@ -17,6 +17,9 @@ TEST_CASE("duration and speed clamp to their ranges") {
     CHECK(clampDuration(9.0f) == 4.0f);
     CHECK(clampDuration(std::numeric_limits<float>::quiet_NaN()) == 4.0f);
     CHECK(clampWorldSpeed(0.0f) == MinWorldSpeed);
+    CHECK(clampWorldSpeed(0.01f) == doctest::Approx(0.01f));
+    CHECK(clampWorldSpeed(100.0f) == doctest::Approx(100.0f));
+    CHECK(clampWorldSpeed(1000.0f) == MaxWorldSpeed);
     CHECK(clampWorldSpeed(std::numeric_limits<float>::quiet_NaN()) == 1.0f);
 }
 

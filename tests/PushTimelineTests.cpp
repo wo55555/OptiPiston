@@ -25,7 +25,9 @@ struct Scene {
     bool                    landed{}; // the real block exists in the cell
     bool                    visible{true};
     std::optional<double>   commitAt; // when the pending build goes live
-    std::optional<uint64_t> commitFrame;
+    std::optional<uint64_t> commitFrame; // the frame the mesh with the block went on screen
+    int                     promoteFrames{-1}; // frames from commit to the game showing it; -1 shows it at once
+    std::optional<uint64_t> showAt;
     std::optional<uint64_t> actorFrom; // the landed cell's own actor draws from this frame on
 
     int zeroFrames{};
@@ -81,9 +83,19 @@ struct Scene {
         }
         if (timeline.shouldRequestRemesh(time, latency + dt)) requestRemesh(timeline.remeshRequested(time));
         if (commitAt && time >= *commitAt && timeline.awaitingMesh()) {
-            timeline.meshCommitted(frame);
-            commitFrame = frame;
+            if (promoteFrames < 0) {
+                timeline.meshCommitted(frame);
+                commitFrame = frame;
+            } else {
+                timeline.meshCommitted(frame, false);
+                showAt = frame + static_cast<uint64_t>(promoteFrames);
+            }
             commitAt.reset();
+        }
+        if (showAt && frame >= *showAt) {
+            timeline.meshShown(frame);
+            commitFrame = frame;
+            showAt.reset();
         }
         if (actorFrom && frame >= *actorFrom) timeline.landedActorSeen(frame);
         check();
@@ -126,6 +138,45 @@ TEST_CASE("the proxy keeps drawing until the mesh with the block is on screen") 
     CHECK(scene.mismatches == 0);
     CHECK(scene.zeroFrames == 0);
     CHECK(scene.timeline.state() == PushState::Done);
+}
+
+TEST_CASE("a committed mesh hands over only once the game shows it") {
+    for (bool actor : {false, true}) {
+        Scene quick(50, 4.0f, actor);
+        quick.runUntilTick(51);
+        quick.land();
+        quick.actorFrom = quick.frame + 30;
+        quick.runUntilTick(62);
+
+        Scene scene(50, 4.0f, actor);
+        scene.promoteFrames = 8;
+        scene.runUntilTick(51);
+        scene.land();
+        scene.actorFrom = scene.frame + 30;
+        scene.runUntilTick(54);
+        CHECK_FALSE(scene.timeline.awaitingMesh());
+        scene.runUntilTick(62);
+        CHECK(scene.zeroFrames == 0);
+        CHECK(scene.mismatches == 0);
+        CHECK(scene.timeline.state() == PushState::Done);
+        CHECK(scene.timeline.drawer(scene.frame) == PushDrawer::Mesh);
+        if (!actor) CHECK(scene.proxyFrames >= quick.proxyFrames + 8);
+    }
+}
+
+TEST_CASE("a landed cell whose mesh never reports the block goes to the mesh at the landing deadline") {
+    Scene scene(10, 2.0f, false);
+    scene.latency = 1.0e9; // no build ever draws the block
+    scene.runUntilTick(11);
+    scene.land();
+    scene.runUntilTick(13);
+    REQUIRE(scene.timeline.state() == PushState::Landing);
+    scene.runUntilTick(12 + DefaultLandingTicks - 2);
+    CHECK(scene.timeline.state() == PushState::Landing);
+    scene.runUntilTick(12 + DefaultLandingTicks + 2);
+    CHECK(scene.timeline.state() == PushState::Done);
+    CHECK(scene.timeline.handoverEnd() == HandoverEnd::Timeout);
+    CHECK(scene.zeroFrames == 0);
 }
 
 TEST_CASE("the mesh is suppressed only between landing and the re-mesh request") {
@@ -231,13 +282,13 @@ TEST_CASE("a handover ends at once when the landed actor was already drawing") {
     CHECK(scene.mismatches == 0);
 }
 
-TEST_CASE("a landed block waits for its mesh for as long as the build takes") {
+TEST_CASE("a landed block waits for its mesh until the landing deadline") {
     for (bool actor : {false, true}) {
         Scene scene(100, 3.0f, actor);
         scene.latency = 1.0e6;
         scene.runUntilTick(101);
         scene.land();
-        scene.runUntilTick(100 + 3 + 1000);
+        scene.runUntilTick(100 + DefaultLandingTicks - 5);
         CHECK(scene.timeline.state() == PushState::Landing);
         CHECK(scene.timeline.drawer(scene.frame) == PushDrawer::Proxy);
         scene.timeline.meshCommitted(scene.frame);

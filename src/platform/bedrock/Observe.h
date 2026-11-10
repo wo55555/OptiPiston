@@ -1,6 +1,6 @@
 #pragma once
 
-// Stage S0 of the overlay rewrite: observation probes (observe.log). Version 2 (r59).
+// Stage S0 of the overlay rewrite: observation probes (observe.log). Version 2.
 // Compiled into probe builds, or into observe-only builds (--probe=n --observe=y), of the 26.50 line.
 // Every call below is a no-op elsewhere.
 
@@ -18,7 +18,6 @@
 
 #if OPTIPISTON_OBSERVE
 #include <cstdint>
-#include <string>
 
 class MovingBlockActor;
 #endif
@@ -45,8 +44,6 @@ void     buildBegin(void const* geometry, int x, int y, int z, unsigned char ver
 void     buildEnd();
 uint64_t commitBegin();
 void     buildCommit(void const* geometry, uint64_t commitBeginQpc);
-// Ends the current segment (summary lines) and starts a new one: /optipiston mark <label>.
-void mark(std::string const& label);
 #endif
 
 } // namespace optipiston::platform::observe

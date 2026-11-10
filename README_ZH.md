@@ -5,9 +5,9 @@
   <p>面向 Windows LeviLamina 的 Minecraft 基岩版纯客户端模组，提供平滑活塞动画和单人世界变速。</p>
 
   <p>
-    <img src="https://img.shields.io/badge/version-v0.2.0-4c8bf5?style=flat-square" alt="OptiPiston v0.2.0">
+    <img src="https://img.shields.io/badge/version-v0.3.0-4c8bf5?style=flat-square" alt="OptiPiston v0.3.0">
     <img src="https://img.shields.io/badge/Minecraft%20Bedrock-Windows%20x64-62b47a?style=flat-square" alt="Windows x64 Minecraft 基岩版">
-    <img src="https://img.shields.io/badge/LeviLamina-26.10%E2%80%9326.51-7b68ee?style=flat-square" alt="LeviLamina 26.10 至 26.51">
+    <img src="https://img.shields.io/badge/LeviLamina-26.10%E2%80%9326.60-7b68ee?style=flat-square" alt="LeviLamina 26.10 至 26.60">
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue?style=flat-square" alt="AGPL-3.0 许可证"></a>
   </p>
 
@@ -64,7 +64,7 @@ lip install github.com/wo55555/OptiPiston#client_mc26_20@<version>
 - **平滑活塞动画**：活塞臂和被推方块在 2–4 游戏刻内完成移动，支持小数。仅影响渲染，游戏逻辑保持原生时序。
 - **平滑衔接**：被推方块在真实方块完成重新建网格前持续绘制，避免落位时出现空洞、重影或重叠。
 - **稳定的活塞头**：每格只绘制一个活塞头；被推动的活塞会随其移动中的机身一起绘制。
-- **世界变速**：单人世界以 0.1x–10x 运行，可选同步缩放声音音调和粒子。
+- **世界变速**：单人世界以 0.01x–100x 运行，可选同步缩放声音音调和粒子。
 - **外部时钟 API**：回放、录制类模组可以通过简单的 C API 驱动动画时钟，使暂停、跳转和倍速保持同步。
 - **双语**：命令输出提供英文和简体中文。
 
@@ -76,7 +76,7 @@ lip install github.com/wo55555/OptiPiston#client_mc26_20@<version>
 | `/optipiston piston on`               | 开启活塞动画。                            |
 | `/optipiston piston off`              | 关闭活塞动画。                            |
 | `/optipiston piston duration <ticks>` | 设置动画时长，范围 `2` 到 `4` 游戏刻。    |
-| `/optipiston speed <value>`           | 设置世界速度，范围 `0.1` 到 `10`。        |
+| `/optipiston speed <value>`           | 设置世界速度，范围 `0.01` 到 `100`。      |
 | `/optipiston speed next`              | 切换到下一个世界速度预设。                |
 | `/optipiston speed prev`              | 切换到上一个世界速度预设。                |
 | `/optipiston speed reset`             | 恢复正常速度（`1x`）。                    |
@@ -96,7 +96,7 @@ lip install github.com/wo55555/OptiPiston#client_mc26_20@<version>
         "durationTicks": 4.0
     },
     "worldSpeed": {
-        "presets": [0.1, 0.25, 0.5, 1.0, 2.0, 4.0],
+        "presets": [0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 4.0, 10.0, 20.0, 50.0, 100.0],
         "audio": true,
         "particles": true
     },
@@ -141,15 +141,16 @@ API v1 还可以读写活塞动画开关和时长；设置值会限制在支持�
 | 26.20            | `26.20.*`  | `client_mc26_20` | 预发布，已在 `0.1.0` 实机测试 |
 | 26.30            | `26.32.*`  | `client_mc26_30` | 预发布，尚未实机测试          |
 | 26.40            | `26.40.*`  | `client_mc26_40` | 预发布，尚未实机测试          |
-| 26.50            | `26.51.*`  | `client_mc26_50` | 预发布，已在 `0.2.0` 实机测试 |
+| 26.50            | `26.51.*`  | `client_mc26_50` | 预发布，已在 `0.3.0` 实机测试 |
+| 26.60            | `26.60.*`  | `client_mc26_60` | 预发布，尚未实机测试          |
 
 回缩带方块后活塞臂和活塞头发黑的光照修复目前只在 26.50 上启用；其他版本线在验证其原生函数签名之前保持原版光照。
 
-OptiPiston 面向 Windows x64 平台的 Minecraft 基岩版，以纯客户端模组形式发布。所有版本线都在同一个发行版 [`v0.2.0`](https://github.com/wo55555/OptiPiston/releases/tag/v0.2.0) 中发布，每条版本线一个资产 `OptiPiston-mc<版本线>-windows-x64.zip`，各自只能在所列 LeviLamina 版本上加载。目前已发布的都是预发布版本。
+OptiPiston 面向 Windows x64 平台的 Minecraft 基岩版，以纯客户端模组形式发布。所有版本线都在同一个发行版 [`v0.3.0`](https://github.com/wo55555/OptiPiston/releases/tag/v0.3.0) 中发布，每条版本线一个资产 `OptiPiston-mc<版本线>-windows-x64.zip`，各自只能在所列 LeviLamina 版本上加载。目前已发布的都是预发布版本。
 
 ## 从源码构建
 
-OptiPiston 使用 xmake、LLVM（clang-cl，CI 使用 LLVM 22）和 Git 在 Windows x64 上构建。`--mc` 选择[兼容性](#兼容性)中的版本线：`26.10`、`26.20`、`26.30`、`26.40` 或 `26.50`。`26.10` 改用 MSVC（Visual Studio 2022）构建，因为 LeviLamina 26.10 自带的 rapidjson 无法在当前 clang 下编译。
+OptiPiston 使用 xmake、LLVM（clang-cl，CI 使用 LLVM 22）和 Git 在 Windows x64 上构建。`--mc` 选择[兼容性](#兼容性)中的版本线：`26.10`、`26.20`、`26.30`、`26.40`、`26.50` 或 `26.60`。`26.10` 改用 MSVC（Visual Studio 2022）构建，因为 LeviLamina 26.10 自带的 rapidjson 无法在当前 clang 下编译。
 
 ```powershell
 xmake f -c -y -p windows -a x64 -m release --target_type=client --mc=<版本线>
@@ -162,7 +163,7 @@ xmake run optipiston-tests
 
 ### 打包发布
 
-包版本是 `xmake.lua` 中的 `optipiston_version`；模组清单中的版本会再加上版本线，例如 `0.2.0-mc26.20`。`tooth.json` 为每条版本线提供一个变体。配置时会同步其中的版本号，并在任一变体的 LeviLamina 版本范围或资产名与 `xmake.lua` 不一致时报错。Lip 按发布标签处的 `tooth.json` 安装，因此发布前要先提交它。**Publish** 工作流用同一个标签发布所有版本线：
+包版本是 `xmake.lua` 中的 `optipiston_version`；模组清单中的版本会再加上版本线，例如 `0.3.0-mc26.20`。`tooth.json` 为每条版本线提供一个变体。配置时会同步其中的版本号，并在任一变体的 LeviLamina 版本范围或资产名与 `xmake.lua` 不一致时报错。Lip 按发布标签处的 `tooth.json` 安装，因此发布前要先提交它。**Publish** 工作流用同一个标签发布所有版本线：
 
 1. 修改 `xmake.lua` 中的 `optipiston_version`，运行 `xmake f` 同步 `tooth.json`，在 `CHANGELOG.md` 中添加 `## [<版本>]` 章节，并推送到 `main`。
 2. 运行工作流：
@@ -171,7 +172,7 @@ xmake run optipiston-tests
    gh workflow run publish.yml
    ```
 
-3. 工作流为 `main` 打 `v<版本>` 标签（例如 `v0.2.0`），构建并测试 `tooth.json` 中的每条版本线，然后发布一个预发布版本，附带 `CHANGELOG.md` 中的说明和每条版本线各自的 `OptiPiston-mc<版本线>-windows-x64.zip`。任一版本线构建失败都不会发布。
+3. 工作流为 `main` 打 `v<版本>` 标签（例如 `v0.3.0`），构建并测试 `tooth.json` 中的每条版本线，然后发布一个预发布版本，附带 `CHANGELOG.md` 中的说明和每条版本线各自的 `OptiPiston-mc<版本线>-windows-x64.zip`。任一版本线构建失败都不会发布。
 
 ## 已知限制
 

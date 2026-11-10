@@ -5,9 +5,9 @@
   <p>A client-only LeviLamina mod for Minecraft Bedrock on Windows that smooths piston animation and adds singleplayer world speed control.</p>
 
   <p>
-    <img src="https://img.shields.io/badge/version-v0.2.0-4c8bf5?style=flat-square" alt="OptiPiston v0.2.0">
+    <img src="https://img.shields.io/badge/version-v0.3.0-4c8bf5?style=flat-square" alt="OptiPiston v0.3.0">
     <img src="https://img.shields.io/badge/Minecraft%20Bedrock-Windows%20x64-62b47a?style=flat-square" alt="Minecraft Bedrock for Windows x64">
-    <img src="https://img.shields.io/badge/LeviLamina-26.10%E2%80%9326.51-7b68ee?style=flat-square" alt="LeviLamina 26.10 to 26.51">
+    <img src="https://img.shields.io/badge/LeviLamina-26.10%E2%80%9326.60-7b68ee?style=flat-square" alt="LeviLamina 26.10 to 26.60">
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue?style=flat-square" alt="AGPL-3.0 license"></a>
   </p>
 
@@ -64,7 +64,7 @@ Download `OptiPiston-mc<line>-windows-x64.zip` for your line (for example `OptiP
 - **Smooth piston animation**: Arms and pushed blocks move over 2–4 game ticks, fractions included. Rendering only; game logic keeps its native timing.
 - **Clean hand-off**: A pushed block stays drawn until its real block has been re-meshed, which avoids gaps, ghost copies, and overlap where it lands.
 - **Stable heads**: Each cell draws exactly one piston head, and a piston that is itself being pushed follows its moving body.
-- **World speed**: Runs a singleplayer world at 0.1x–10x, with optional sound pitch and particle scaling.
+- **World speed**: Runs a singleplayer world at 0.01x–100x, with optional sound pitch and particle scaling.
 - **External clock API**: Replay and recording mods can drive the animation clock through a small C API, so pause, seek, and speed changes stay in sync.
 - **Bilingual**: English and Simplified Chinese command output.
 
@@ -76,7 +76,7 @@ Download `OptiPiston-mc<line>-windows-x64.zip` for your line (for example `OptiP
 | `/optipiston piston on`               | Turn piston animation on.                                      |
 | `/optipiston piston off`              | Turn piston animation off.                                     |
 | `/optipiston piston duration <ticks>` | Set the animation length, from `2` to `4` game ticks.          |
-| `/optipiston speed <value>`           | Set world speed, from `0.1` to `10`.                           |
+| `/optipiston speed <value>`           | Set world speed, from `0.01` to `100`.                         |
 | `/optipiston speed next`              | Switch to the next world speed preset.                         |
 | `/optipiston speed prev`              | Switch to the previous world speed preset.                     |
 | `/optipiston speed reset`             | Return to normal speed (`1x`).                                 |
@@ -96,7 +96,7 @@ The configuration lives at `mods/OptiPiston/config/config.json` and is kept acro
         "durationTicks": 4.0
     },
     "worldSpeed": {
-        "presets": [0.1, 0.25, 0.5, 1.0, 2.0, 4.0],
+        "presets": [0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 4.0, 10.0, 20.0, 50.0, 100.0],
         "audio": true,
         "particles": true
     },
@@ -141,15 +141,16 @@ API v1 also reads and writes the piston toggle and duration. Setters clamp to th
 | 26.20          | `26.20.*`  | `client_mc26_20` | Prerelease; tested in game on `0.1.0` |
 | 26.30          | `26.32.*`  | `client_mc26_30` | Prerelease; not yet tested in game    |
 | 26.40          | `26.40.*`  | `client_mc26_40` | Prerelease; not yet tested in game    |
-| 26.50          | `26.51.*`  | `client_mc26_50` | Prerelease; tested in game on `0.2.0` |
+| 26.50          | `26.51.*`  | `client_mc26_50` | Prerelease; tested in game on `0.3.0` |
+| 26.60          | `26.60.*`  | `client_mc26_60` | Prerelease; not yet tested in game    |
 
 The arm lighting fix (no black arm or head after retracting with a block) is active on 26.50 only. Other lines keep the vanilla lighting until its native signature is verified there.
 
-Every line ships in the same release, [`v0.2.0`](https://github.com/wo55555/OptiPiston/releases/tag/v0.2.0), as its own asset `OptiPiston-mc<line>-windows-x64.zip`; each build only loads on the listed LeviLamina version. All currently published releases are prereleases. OptiPiston targets Minecraft Bedrock for Windows x64 and is distributed as a client-only mod.
+Every line ships in the same release, [`v0.3.0`](https://github.com/wo55555/OptiPiston/releases/tag/v0.3.0), as its own asset `OptiPiston-mc<line>-windows-x64.zip`; each build only loads on the listed LeviLamina version. All currently published releases are prereleases. OptiPiston targets Minecraft Bedrock for Windows x64 and is distributed as a client-only mod.
 
 ## Build From Source
 
-OptiPiston builds on Windows x64 with xmake, LLVM (clang-cl, CI uses LLVM 22), and Git. `--mc` selects the release line from [Compatibility](#compatibility): `26.10`, `26.20`, `26.30`, `26.40`, or `26.50`. The `26.10` build uses MSVC (Visual Studio 2022) instead, because the rapidjson bundled with LeviLamina 26.10 does not compile under current clang.
+OptiPiston builds on Windows x64 with xmake, LLVM (clang-cl, CI uses LLVM 22), and Git. `--mc` selects the release line from [Compatibility](#compatibility): `26.10`, `26.20`, `26.30`, `26.40`, `26.50`, or `26.60`. The `26.10` build uses MSVC (Visual Studio 2022) instead, because the rapidjson bundled with LeviLamina 26.10 does not compile under current clang.
 
 ```powershell
 xmake f -c -y -p windows -a x64 -m release --target_type=client --mc=<line>
@@ -162,7 +163,7 @@ For example, `--mc=26.20` builds the MC 26.20 / LeviLamina 26.20 line. The mod i
 
 ### Packaging a Release
 
-The package version is `optipiston_version` in `xmake.lua`; the mod manifest adds the line, for example `0.2.0-mc26.20`. `tooth.json` has one variant per line. Configuring syncs its version and fails if any variant's LeviLamina range or asset name does not match `xmake.lua`. Lip installs from the `tooth.json` at the release tag, so commit it before publishing. The **Publish** workflow releases every line under one tag:
+The package version is `optipiston_version` in `xmake.lua`; the mod manifest adds the line, for example `0.3.0-mc26.20`. `tooth.json` has one variant per line. Configuring syncs its version and fails if any variant's LeviLamina range or asset name does not match `xmake.lua`. Lip installs from the `tooth.json` at the release tag, so commit it before publishing. The **Publish** workflow releases every line under one tag:
 
 1. Bump `optipiston_version` in `xmake.lua`, run `xmake f` to sync `tooth.json`, add a `## [<version>]` section to `CHANGELOG.md`, and push to `main`.
 2. Run the workflow:
@@ -171,7 +172,7 @@ The package version is `optipiston_version` in `xmake.lua`; the mod manifest add
    gh workflow run publish.yml
    ```
 
-3. It tags `main` as `v<version>` (for example `v0.2.0`), builds and tests every line in `tooth.json`, and publishes one prerelease with its notes from `CHANGELOG.md` and an `OptiPiston-mc<line>-windows-x64.zip` per line. Nothing is published unless every line builds.
+3. It tags `main` as `v<version>` (for example `v0.3.0`), builds and tests every line in `tooth.json`, and publishes one prerelease with its notes from `CHANGELOG.md` and an `OptiPiston-mc<line>-windows-x64.zip` per line. Nothing is published unless every line builds.
 
 ## Known Limitations
 

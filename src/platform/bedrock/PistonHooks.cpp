@@ -35,12 +35,16 @@
 #include "mc/client/renderer/BaseActorRenderContext.h"
 #include "mc/client/renderer/block/BlockOccluder.h"
 #include "mc/client/renderer/block/BlockTessellator.h"
+#include "mc/client/renderer/block/BlockTessellatorCache.h"
 #include "mc/client/renderer/blockactor/BlockActorRenderData.h"
 #include "mc/client/renderer/blockactor/BlockActorRenderDispatcher.h"
 #include "mc/client/renderer/blockactor/MovingBlockActorRenderer.h"
 #include "mc/client/renderer/blockactor/PistonBlockActorRenderer.h"
 #include "mc/client/renderer/chunks/RenderChunkCoordinator.h"
 #include "mc/client/renderer/chunks/RenderChunkGeometry.h"
+#if OPTIPISTON_MC >= 2651
+#include "mc/client/renderer/chunks/RenderChunkInstanced.h"
+#endif
 #include "mc/client/renderer/game/LevelRenderer.h"
 #include "mc/client/renderer/game/LevelRendererCamera.h"
 #include "mc/client/renderer/game/LevelRendererPlayer.h"
@@ -210,10 +214,10 @@ QueuedItem* queuedItemOf(::BlockActor* actor) { return actor; }
 // Maps each stepped piston to the level tick it last ticked on, so pruning can drop destroyed ones.
 std::unordered_map<::BlockActor const*, int64_t> gSteppedPistons;
 
-// Ownership is scoped to one round: a destroyed piston's address cannot be detected, and a claim outliving its owner
-// locked the cell for good, leaving frames with no head at all. Re-electing each round bounds a stale address to the
-// round it was seen in. The round advances on PistonBlockActor::$tick, which runs once per game tick.
-std::atomic<uint64_t> gHeadOwnerRound{0};
+// HeadOwner::round is one rendered frame (gFrame). A destroyed piston's address cannot be detected, and a
+// claim that outlived its owner locked the cell, leaving frames with no head. gFrame stays put for every pass
+// of one rendered frame and advances only after that frame, so a claim from an earlier frame of the same game
+// tick cannot suppress the only head submitted now.
 
 struct HeadOwner {
     uint64_t            round{};
@@ -693,10 +697,14 @@ std::atomic<uint64_t> gFrame{1};
 std::atomic_bool      gFrameDrewActors{false};
 // Chunk geometry being tessellated on this thread.
 thread_local ::RenderChunkGeometry const* tMeshGeometry = nullptr;
+// Positions of the managed cells whose tessellation produced geometry during the current build.
+thread_local std::unordered_set<::BlockPos, BlockPosHash> tMeshProduced;
 // Cells tessellated as real blocks after their re-mesh request, per build that has not been uploaded yet.
 std::unordered_map<::RenderChunkGeometry const*, std::vector<::BlockPos>> gReleasedMesh;
 // Cells a build met as awaiting but found the stand-in or air in its chunk copy: it cannot contain the block.
 std::unordered_map<::RenderChunkGeometry const*, std::vector<::BlockPos>> gStaleMesh;
+// Cells a build tessellated with geometry, awaiting that build's commit.
+std::unordered_map<::RenderChunkGeometry const*, std::vector<::BlockPos>> gProducedMesh;
 // Cells whose awaiting state was just published; builds in flight at that moment may not have seen it.
 std::vector<::BlockPos> gAwaitPublished;
 // Builds between start and commit, with the origin of their chunk; and the cells created while one was running.
@@ -706,6 +714,23 @@ std::unordered_map<::RenderChunkGeometry const*, ::BlockPos>              gBuild
 std::unordered_map<::RenderChunkGeometry const*, std::vector<::BlockPos>> gStaleRisk;
 // Landed cells found by the renderer; the next tick re-meshes them.
 std::vector<::BlockPos> gPendingRemesh;
+#if OPTIPISTON_MC >= 2651
+// A committed build waits for promoteSortedGeometry; a later build can show earlier cells in the same subchunk.
+struct StagedCell {
+    uint64_t   order;
+    ::BlockPos pos;
+};
+std::unordered_map<::BlockPos, std::vector<StagedCell>>     gStagedMesh;
+std::unordered_map<::RenderChunkGeometry const*, uint64_t> gStagedBuilds;
+uint64_t                                                    gStagedOrder = 0;
+std::atomic_bool                                            gStagedWatch{false};
+// An unpromoted build releases its proxy after the staging timeout.
+constexpr double   kStagedSeconds   = 0.25;
+constexpr uint64_t kStagedMinFrames = 2;
+constexpr bool     kCommitShows     = false;
+#else
+constexpr bool kCommitShows = true;
+#endif
 // Landed cells are re-meshed just before their motion ends, so the proxy does not have to cover the re-mesh. All in
 // visual ticks. Written by the render and frame threads without gAnimMutex, hence atomic.
 std::atomic<double>                   gLastVisualTime{0.0};
@@ -762,7 +787,16 @@ public:
     }
     ~MeshBuildScope() {
         tBuild = mSaved;
-        if ((mReleased.empty() && mStale.empty()) || !gMeshWatch.load(std::memory_order_relaxed)) return;
+        bool const watch = gMeshWatch.load(std::memory_order_relaxed);
+        if (!tMeshProduced.empty()) {
+            std::lock_guard const guard(gAnimMutex);
+            auto&                     cells = gProducedMesh[mGeometry];
+            cells.reserve(cells.size() + tMeshProduced.size());
+            for (auto const& pos : tMeshProduced) cells.push_back(pos);
+        }
+        tMeshProduced.clear();
+        if ((mReleased.empty() && mStale.empty()) || !watch)
+            return;
         std::lock_guard const guard(gAnimMutex);
         if (!mReleased.empty()) {
             auto& list = gReleasedMesh[mGeometry];
@@ -1083,7 +1117,7 @@ struct ProbeCounters {
     std::atomic<uint64_t> innerPassed{0};   // tessellateBlockInWorld reached for a managed cell, not suppressed
     std::atomic<uint64_t> innerHidden{0};   // tessellateBlockInWorld reached for a managed cell, suppressed
     std::atomic<uint64_t> actorStripped{0}; // proxy drawn without its actor copy because the landed actor was drawn
-    // Pre-arrival flicker probe (r74).
+    // Pre-arrival flicker probe.
     std::atomic<uint64_t> dupEpisodes{0};    // closed runs of consecutive frames in which a cell was drawn twice
     std::atomic<uint64_t> dupMs{0};          // their summed duration, wall milliseconds
     std::atomic<uint64_t> dupMaxFrames{0};   // longest such run
@@ -1099,8 +1133,20 @@ struct ProbeCounters {
     std::atomic<uint64_t> lightAnyDark{0};   // of those, frames in which some queried cell read 0/0
     std::atomic<uint64_t> lightSelfDark{0};  // of those, frames in which the proxy's own cell read 0/0
     std::atomic<uint64_t> lightFlip{0};      // dark pattern differed from the cell's previous Animating frame
-    std::atomic<uint64_t> lightSelfFixed{0}; // own-cell 0/0 answers replaced by the cell's remembered lit answer
-    std::atomic<uint64_t> lightSelfNoMem{0}; // own-cell 0/0 answers with nothing remembered, passed on as they were
+    std::atomic<uint64_t> lightSelfFixed{0};    // own-cell 0/0 answers replaced by the cell's remembered lit answer
+    std::atomic<uint64_t> lightSelfNoMem{0};    // own-cell 0/0 answers still 0 with nothing remembered
+    // A released cell whose tessellation in a build produced no geometry.
+    std::atomic<uint64_t> emptyRelease{0}; // such tessellations
+    std::atomic<uint64_t> emptyHeld{0};    // awaiting cells kept waiting because their build drew nothing for them
+    std::atomic<uint64_t> exactCommit{0};  // awaiting cells handed to the mesh by a build that drew their block
+    // What the renderer actually returned while a proxy was on screen. Cumulative.
+    std::atomic<uint64_t> proxyTessFrames{0}; // Animating proxy frames whose own cell tessellated
+    std::atomic<uint64_t> proxyEmpty{0};      // Animating proxy frames that drew with no geometry for the cell
+    std::atomic<uint64_t> resDarkSelf{0};     // own-cell light answers that stayed 0 after the memory fix
+    std::atomic<uint64_t> resDarkNb{0};       // neighbor light answers that stayed 0 (raw, post-fix is the same)
+    std::atomic<uint64_t> allDarkFrames{0};   // Animating proxy frames whose every light answer came back 0
+    std::atomic<uint64_t> drawPosOrigin[4]{}; // getDrawPos fell through: anim, landing, handover, other
+    std::atomic<uint64_t> unprobedFrames{0};  // frames with live cells whose actor pass never ran probeFrameEnd
     std::atomic<uint64_t> armGapMid{0};      // armGap of a running piston that still had over 0.05 block to go
     std::atomic<uint64_t> clkChecks{0};      // visual clock advance compared with the wall clock
     std::atomic<uint64_t> clkBack{0};        // the visual clock went backwards between two frames
@@ -1133,6 +1179,11 @@ struct ProbeTally {
     int       lightQ{};        // light queries made while the proxy was dispatched
     int       lightDark{};     // of those, answered 0/0
     int       lightSelfDark{}; // of those, asked for the proxy's own cell and answered 0/0
+    int       selfTess{};      // tessellate calls for the proxy's own cell during the dispatch
+    int       selfTessOk{};    // of those, calls that produced geometry
+    int       resDarkSelf{};   // own-cell answers that were still 0 after the fix
+    int       resDarkNb{};     // neighbor answers that were 0
+    int       resLit{};        // answers that were not 0 after the fix
     int       why{}; // ProbeWhy::reason of the last game instance drawn for the cell
     uint64_t  whyRec{};
     uint64_t  whyPiston{};
@@ -1187,6 +1238,15 @@ struct ProbeCell {
     float    lastX{}, lastY{}, lastZ{};
     double   lastTime{};
     uint64_t lastPosFrame{};
+    // Open run of Animating frames that look blank. blinkWhy: 0 no geometry, 1 draw pos at the origin, 2 every light 0.
+    int      blinkWhy{-1};
+    int      blinkFrames{};
+    uint64_t blinkLast{};
+    float    blinkOff{};
+    int      blinkQ{};
+    int      blinkResSelf{};
+    int      blinkResNb{};
+    int      blinkTessOk{};
     bool     havePos{};
     int      lastLightSig{-1}; // queries, dark answers and own-cell dark answers of the previous Animating frame
     uint64_t lastLightFrame{};
@@ -1421,8 +1481,26 @@ struct ProbeProxyLight {
     int        queries{};
     int        dark{};
     int        selfDark{};
+    int        selfTess{};
+    int        selfTessOk{};
+    int        resDarkSelf{};
+    int        resDarkNb{};
+    int        resLit{};
 };
 thread_local ProbeProxyLight tProbeProxyLight;
+// Relative light samples of one proxy dispatch. Slots 0..26 are dx,dy,dz in -1..1; 27 is anything farther.
+struct BlinkSlot {
+    uint32_t n{};
+    uint32_t rawDark{};
+    uint32_t resDark{};
+};
+thread_local BlinkSlot tBlinkRel[28];
+struct BlinkRel {
+    std::atomic<uint64_t> n{0};
+    std::atomic<uint64_t> rawDark{0};
+    std::atomic<uint64_t> resDark{0};
+};
+BlinkRel gBlinkRel[28];
 
 // Every line starts with the frame counter and the level tick.
 template <class... Args>
@@ -1490,6 +1568,31 @@ void probeCloseDupLocked(::BlockPos const& pos, ProbeCell& cell) {
     cell.dupWorld.clear();
 }
 
+// Closes the open blank-frame run of a cell. Caller holds gProbeMutex.
+void probeCloseBlinkLocked(::BlockPos const& pos, ProbeCell& cell) {
+    if (cell.blinkFrames == 0) return;
+    static char const* const     names[] = {"empty", "origin", "allDark"};
+    static std::atomic<uint64_t> used[3]{};
+    int const                    why = cell.blinkWhy;
+    if (why >= 0 && why < 3 && probeBudget(used[why], 100, "blink")) {
+        probeLineLocked(
+            "blink cell=%d,%d,%d why=%s frames=%d off=%.3f q=%d resSelf=%d resNb=%d tessOk=%d\n",
+            pos.x,
+            pos.y,
+            pos.z,
+            names[why],
+            cell.blinkFrames,
+            static_cast<double>(cell.blinkOff),
+            cell.blinkQ,
+            cell.blinkResSelf,
+            cell.blinkResNb,
+            cell.blinkTessOk
+        );
+    }
+    cell.blinkFrames = 0;
+    cell.blinkWhy    = -1;
+}
+
 void probeFlushLocked() {
     if (gProbeFile && !gProbeBuffer.empty()) {
         std::fwrite(gProbeBuffer.data(), 1, gProbeBuffer.size(), gProbeFile);
@@ -1531,7 +1634,7 @@ void probeOpen() {
     for (int i = 0; i < 2000; ++i) (void)perfNow();
     auto const qpcNs = static_cast<double>(perfNow() - readStart) * 1.0e9
                      / (static_cast<double>(std::max<uint64_t>(perfFrequency(), 1)) * 2000.0);
-    probeLineLocked("mode perfOnly=%d qpcNs=%.1f\n", perfOnly ? 1 : 0, qpcNs);
+    probeLineLocked("mode perfOnly=%d qpcNs=%.1f exactCommitProbe=3 frameRound=1 carrySource=1\n", perfOnly ? 1 : 0, qpcNs);
     gProbeLastSum = std::chrono::steady_clock::now();
 }
 
@@ -1615,13 +1718,30 @@ void probeProxyDrawPos(::BlockPos const& cell, float offset, ::Vec3 const* vec) 
 void probeProxyLightEnd(::BlockPos const& cell) {
     auto const seen         = tProbeProxyLight;
     tProbeProxyLight.active = false;
-    if (seen.queries == 0 || gProbePerfOnly.load(std::memory_order_relaxed)) return;
+    BlinkSlot rel[28];
+    for (int i = 0; i < 28; ++i) {
+        rel[i]       = tBlinkRel[i];
+        tBlinkRel[i] = {};
+    }
+    if (gProbePerfOnly.load(std::memory_order_relaxed)) return;
+    if (seen.queries == 0 && seen.selfTess == 0) return;
     std::lock_guard const guard(gProbeMutex);
     auto&                 tally = gProbeTally[cell];
-    tally.lightQ         += seen.queries;
-    tally.lightDark      += seen.dark;
-    tally.lightSelfDark  += seen.selfDark;
+    tally.lightQ        += seen.queries;
+    tally.lightDark     += seen.dark;
+    tally.lightSelfDark += seen.selfDark;
+    tally.selfTess      += seen.selfTess;
+    tally.selfTessOk    += seen.selfTessOk;
+    tally.resDarkSelf   += seen.resDarkSelf;
+    tally.resDarkNb     += seen.resDarkNb;
+    tally.resLit        += seen.resLit;
     gProbe.lightQueries.fetch_add(static_cast<uint64_t>(seen.queries), std::memory_order_relaxed);
+    for (int i = 0; i < 28; ++i) {
+        if (rel[i].n == 0) continue;
+        gBlinkRel[i].n.fetch_add(rel[i].n, std::memory_order_relaxed);
+        gBlinkRel[i].rawDark.fetch_add(rel[i].rawDark, std::memory_order_relaxed);
+        gBlinkRel[i].resDark.fetch_add(rel[i].resDark, std::memory_order_relaxed);
+    }
 }
 
 // The game's instance of a managed cell was skipped.
@@ -1923,6 +2043,56 @@ void probeStaleCommit(::BlockPos const& pos, uint64_t action) {
     std::lock_guard const guard(gProbeMutex);
     probeLineLocked(
         "staleCommit cell=%d,%d,%d act=%llu\n",
+        pos.x,
+        pos.y,
+        pos.z,
+        static_cast<unsigned long long>(action)
+    );
+}
+
+// A released cell tessellated to nothing; what the mesh view says about its six neighbours.
+void probeEmptyTess(::BlockPos const& pos) {
+    static std::atomic<uint64_t> lines{0};
+    if (gProbePerfOnly.load(std::memory_order_relaxed) || lines.fetch_add(1, std::memory_order_relaxed) >= 200) return;
+    int kinds[6]{};
+    {
+        MeshViewPin pin;
+        static constexpr int d[6][3]{
+            {-1, 0,  0 },
+            {1,  0,  0 },
+            {0,  -1, 0 },
+            {0,  1,  0 },
+            {0,  0,  -1},
+            {0,  0,  1 }
+        };
+        for (int i = 0; i < 6; ++i)
+            kinds[i] = static_cast<int>(
+                pin.get().at(cellOf(::BlockPos{pos.x + d[i][0], pos.y + d[i][1], pos.z + d[i][2]}))
+            );
+    }
+    std::lock_guard const guard(gProbeMutex);
+    probeLineLocked(
+        "emptyTess cell=%d,%d,%d nb=%d%d%d%d%d%d\n",
+        pos.x,
+        pos.y,
+        pos.z,
+        kinds[0],
+        kinds[1],
+        kinds[2],
+        kinds[3],
+        kinds[4],
+        kinds[5]
+    );
+}
+
+// Caller holds gAnimMutex. An awaiting cell was handed to the mesh because its build drew the block.
+void probeEmptyAsk(::BlockPos const& pos, uint64_t action, int asks, bool accepted) {
+    static std::atomic<uint64_t> lines{0};
+    if (gProbePerfOnly.load(std::memory_order_relaxed) || lines.fetch_add(1, std::memory_order_relaxed) >= 200) return;
+    std::lock_guard const guard(gProbeMutex);
+    probeLineLocked(
+        "%s cell=%d,%d,%d act=%llu\n",
+        accepted ? "exactCommitAt" : "emptyHeldAt",
         pos.x,
         pos.y,
         pos.z,
@@ -2768,6 +2938,7 @@ void probeFrameEnd() {
     std::erase_if(gProbeCells, [](auto& entry) {
         if (gCells.contains(entry.first)) return false;
         probeCloseDupLocked(entry.first, entry.second);
+        probeCloseBlinkLocked(entry.first, entry.second);
         return true;
     });
     gProbeAnyCell.store(!gProbeCells.empty(), std::memory_order_relaxed);
@@ -2811,11 +2982,13 @@ void probeFrameEnd() {
         auto& cell = gProbeCells[pos];
         if (cell.action != rec.action) {
             probeCloseDupLocked(pos, cell);
+            probeCloseBlinkLocked(pos, cell);
             cell        = ProbeCell{};
             cell.action = rec.action;
         }
         // An episode that was not continued on the previous frame is over.
         if (cell.dupFrames > 0 && cell.dupLastFrame + 1 < frame) probeCloseDupLocked(pos, cell);
+        if (cell.blinkFrames > 0 && cell.blinkLast + 1 < frame) probeCloseBlinkLocked(pos, cell);
         auto const state  = rec.timeline.state();
         auto const drawer = drawerOf(rec, frame);
         if (!cell.haveDrawer || cell.drawer != drawer) {
@@ -3033,6 +3206,7 @@ void probeFrameEnd() {
             gProbe.animCellFrames.fetch_add(1, std::memory_order_relaxed);
             if (!tally.timed) {
                 gProbe.unpositioned.fetch_add(1, std::memory_order_relaxed);
+                gProbe.drawPosOrigin[0].fetch_add(1, std::memory_order_relaxed);
                 static std::atomic<uint64_t> used{0};
                 if (cell.unposLogged < 1 && probeBudget(used, 100, "unpositioned")) {
                     ++cell.unposLogged;
@@ -3133,6 +3307,43 @@ void probeFrameEnd() {
                 cell.lastLightSig   = sig;
                 cell.lastLightFrame = frame;
             }
+            if (tally.selfTessOk > 0) gProbe.proxyTessFrames.fetch_add(1, std::memory_order_relaxed);
+            else gProbe.proxyEmpty.fetch_add(1, std::memory_order_relaxed);
+            gProbe.resDarkSelf.fetch_add(static_cast<uint64_t>(tally.resDarkSelf), std::memory_order_relaxed);
+            gProbe.resDarkNb.fetch_add(static_cast<uint64_t>(tally.resDarkNb), std::memory_order_relaxed);
+            if (tally.lightQ > 0 && tally.resLit == 0) gProbe.allDarkFrames.fetch_add(1, std::memory_order_relaxed);
+            int why = -1;
+            if (tally.rendered > 0 && tally.selfTessOk == 0) why = 0;
+            else if (!tally.timed) why = 1;
+            else if (tally.lightQ > 0 && tally.resLit == 0) why = 2;
+            if (why < 0) {
+                if (cell.blinkFrames > 0) probeCloseBlinkLocked(pos, cell);
+            } else if (cell.blinkWhy == why && cell.blinkLast + 1 == frame) {
+                ++cell.blinkFrames;
+                cell.blinkLast    = frame;
+                cell.blinkOff     = tally.timed ? tally.maxOffset : 0.0f;
+                cell.blinkQ       = tally.lightQ;
+                cell.blinkResSelf = tally.resDarkSelf;
+                cell.blinkResNb   = tally.resDarkNb;
+                cell.blinkTessOk  = tally.selfTessOk;
+            } else {
+                if (cell.blinkFrames > 0) probeCloseBlinkLocked(pos, cell);
+                cell.blinkWhy     = why;
+                cell.blinkFrames  = 1;
+                cell.blinkLast    = frame;
+                cell.blinkOff     = tally.timed ? tally.maxOffset : 0.0f;
+                cell.blinkQ       = tally.lightQ;
+                cell.blinkResSelf = tally.resDarkSelf;
+                cell.blinkResNb   = tally.resDarkNb;
+                cell.blinkTessOk  = tally.selfTessOk;
+            }
+        } else if (cell.blinkFrames > 0) {
+            probeCloseBlinkLocked(pos, cell);
+        }
+
+        if (proxyDrawn && !tally.timed && state != PushState::Animating) {
+            int const slot = state == PushState::Landing ? 1 : state == PushState::Handover ? 2 : 3;
+            gProbe.drawPosOrigin[slot].fetch_add(1, std::memory_order_relaxed);
         }
 
         if (proxyDrawn) {
@@ -3794,7 +4005,8 @@ void probeRealFrameEnd() {
             "dupMaxFrames=%llu dupVisFrames=%llu posChecks=%llu posJump=%llu posBack=%llu armGapMid=%llu "
             "armGapLen=%llu/%llu/%llu/%llu/%llu clkChecks=%llu clkBack=%llu clkStall=%llu clkSpread=%llu "
             "clkErr=%llu/%llu/%llu/%llu/%llu/%llu/%llu lightQueries=%llu lightFrames=%llu lightAnyDark=%llu "
-            "lightSelfDark=%llu lightFlip=%llu lightSelfFixed=%llu lightSelfNoMem=%llu\n",
+            "lightSelfDark=%llu lightFlip=%llu lightSelfFixed=%llu lightSelfNoMem=%llu "
+            "emptyRelease=%llu emptyHeld=%llu exactCommit=%llu\n",
             probeCount(gProbe.animCellFrames),
             probeCount(gProbe.zeroAnim),
             probeCount(gProbe.unpositioned),
@@ -3828,8 +4040,51 @@ void probeRealFrameEnd() {
             probeCount(gProbe.lightSelfDark),
             probeCount(gProbe.lightFlip),
             probeCount(gProbe.lightSelfFixed),
-            probeCount(gProbe.lightSelfNoMem)
+            probeCount(gProbe.lightSelfNoMem),
+            probeCount(gProbe.emptyRelease),
+            probeCount(gProbe.emptyHeld),
+            probeCount(gProbe.exactCommit)
         );
+        probeLineLocked(
+            "blinkSum anim=%llu tess=%llu empty=%llu resDarkSelf=%llu resDarkNb=%llu allDark=%llu unprobed=%llu "
+            "origin=%llu/%llu/%llu/%llu fixed=%llu\n",
+            probeCount(gProbe.animCellFrames),
+            probeCount(gProbe.proxyTessFrames),
+            probeCount(gProbe.proxyEmpty),
+            probeCount(gProbe.resDarkSelf),
+            probeCount(gProbe.resDarkNb),
+            probeCount(gProbe.allDarkFrames),
+            probeCount(gProbe.unprobedFrames),
+            probeCount(gProbe.drawPosOrigin[0]),
+            probeCount(gProbe.drawPosOrigin[1]),
+            probeCount(gProbe.drawPosOrigin[2]),
+            probeCount(gProbe.drawPosOrigin[3]),
+            probeCount(gProbe.lightSelfFixed)
+        );
+        for (int rel = 0; rel < 28; ++rel) {
+            auto const n = gBlinkRel[rel].n.load(std::memory_order_relaxed);
+            if (n == 0) continue;
+            auto const raw = gBlinkRel[rel].rawDark.load(std::memory_order_relaxed);
+            auto const res = gBlinkRel[rel].resDark.load(std::memory_order_relaxed);
+            if (rel == 27) {
+                probeLineLocked(
+                    "blinkRel rel=far n=%llu rawDark=%llu resDark=%llu\n",
+                    static_cast<unsigned long long>(n),
+                    static_cast<unsigned long long>(raw),
+                    static_cast<unsigned long long>(res)
+                );
+                continue;
+            }
+            probeLineLocked(
+                "blinkRel rel=%d,%d,%d n=%llu rawDark=%llu resDark=%llu\n",
+                rel / 9 - 1,
+                (rel / 3) % 3 - 1,
+                rel % 3 - 1,
+                static_cast<unsigned long long>(n),
+                static_cast<unsigned long long>(raw),
+                static_cast<unsigned long long>(res)
+            );
+        }
         probeLineLocked(
             "builds starts=%llu commits=%llu asks=%llu askCells=%llu approachHidden=%llu staleFlag=%llu "
             "staleAsk=%llu awaitFlag=%llu landReask=%llu cleanCommit=%llu\n",
@@ -4176,6 +4431,7 @@ void sweepActions(::BlockSource& region) {
 // A cell a mesh build tessellated as the real block after its re-mesh request. Counts only once the build is
 // uploaded; a superseded build never reaches endRebuild.
 void releasedToMesher(::BlockPos const& pos) {
+    tMeshProduced.insert(pos);
     if (tBuild) {
         tBuild->released(pos);
         return;
@@ -4196,6 +4452,29 @@ void staleToMesher(::BlockPos const& pos) {
     gStaleMesh[tMeshGeometry].push_back(pos);
 }
 
+// Empty geometry hands over only when all six neighbours are settled.
+void tessellatedForMesher(::BlockPos const& pos, bool produced) {
+    if (!produced) {
+        auto const& view = tBuild ? tBuild->view() : emptyMeshView();
+        static constexpr int d[6][3]{
+            {-1, 0,  0 },
+            {1,  0,  0 },
+            {0,  -1, 0 },
+            {0,  1,  0 },
+            {0,  0,  -1},
+            {0,  0,  1 }
+        };
+        bool settled = tBuild != nullptr;
+        for (int i = 0; settled && i < 6; ++i) {
+            auto const kind = view.at(cellOf(::BlockPos{pos.x + d[i][0], pos.y + d[i][1], pos.z + d[i][2]}));
+            settled         = kind != core::MeshCell::Landed && kind != core::MeshCell::Approaching;
+        }
+        OPTIPISTON_PROBE_DO(gProbe.emptyRelease.fetch_add(1, std::memory_order_relaxed); probeEmptyTess(pos);)
+        if (!settled) return;
+    }
+    releasedToMesher(pos);
+}
+
 // The mesh view says what to do for the cell; `kind` comes from one view, so the answer is self-consistent.
 bool meshSuppressedIn(core::MeshView const& view, ::BlockPos const& pos, bool& released) {
     auto const kind = view.at(cellOf(pos));
@@ -4208,7 +4487,9 @@ void probeCheckMesh(::BlockPos const& pos);
 #endif
 
 // Worker threads build chunk meshes; the MovingBlock renderer tessellates on the render thread and must pass.
-bool meshSuppressed(::BlockPos const& pos, ::Block const& block) {
+// `release` says the caller must report the tessellation result through tessellatedForMesher.
+bool meshSuppressed(::BlockPos const& pos, ::Block const& block, bool& release) {
+    release = false;
     if (tRenderDepth > 0 || !gMeshWatch.load(std::memory_order_relaxed)) return false;
     MeshViewPin pin;
     bool        released = false;
@@ -4228,7 +4509,7 @@ bool meshSuppressed(::BlockPos const& pos, ::Block const& block) {
         staleToMesher(pos);
         return false;
     }
-    releasedToMesher(pos);
+    release = true;
     return false;
 }
 
@@ -4238,6 +4519,46 @@ bool chunkHolds(::BlockPos const& origin, ::BlockPos const& cell) {
     return cell.x >= origin.x && cell.x < origin.x + kEdge && cell.y >= origin.y && cell.y < origin.y + kEdge
         && cell.z >= origin.z && cell.z < origin.z + kEdge;
 }
+
+// Caller holds gAnimMutex; stage a committed cell until its geometry is shown.
+void stageCellLocked(
+    [[maybe_unused]] ::RenderChunkGeometry const* geometry,
+    [[maybe_unused]] ::BlockPos const&            cell,
+    [[maybe_unused]] core::PushTimeline const&    timeline
+) {
+#if OPTIPISTON_MC >= 2651
+    if (!timeline.awaitingShow()) return;
+    auto const [build, fresh] = gStagedBuilds.try_emplace(geometry, gStagedOrder + 1);
+    if (fresh) ++gStagedOrder;
+    gStagedMesh[geometry->mPosition.get()].push_back({build->second, cell});
+    gStagedWatch.store(true, std::memory_order_relaxed);
+#endif
+}
+
+#if OPTIPISTON_MC >= 2651
+// Caller holds gAnimMutex; record a completed staged build.
+void noteStagedBuildLocked(::RenderChunkGeometry const* geometry) { gStagedBuilds[geometry] = ++gStagedOrder; }
+
+// Caller holds gAnimMutex; release cells when geometry is shown.
+void showStagedLocked(::RenderChunkGeometry const* geometry) {
+    auto const build = gStagedBuilds.find(geometry);
+    auto const found = gStagedMesh.find(geometry->mPosition.get());
+    if (build == gStagedBuilds.end() || found == gStagedMesh.end()) return;
+    auto const order = build->second;
+    gStagedBuilds.erase(build);
+    auto const frame = gFrame.load(std::memory_order_relaxed);
+    auto&      cells = found->second;
+    std::erase_if(cells, [&](StagedCell const& staged) {
+        if (staged.order > order) return false;
+        auto const it = gCells.find(staged.pos);
+        if (it == gCells.end()) return true;
+        it->second.timeline.meshShown(frame);
+        syncCellLocked(it->first, it->second, true);
+        return true;
+    });
+    if (cells.empty()) gStagedMesh.erase(found);
+}
+#endif
 
 // Caller holds gAnimMutex. A build that started before the cell existed may have baked its old block into the mesh.
 void flagStaleRiskLocked(::BlockPos const& cell, [[maybe_unused]] bool awaiting) {
@@ -4268,6 +4589,7 @@ void meshBuildStarted(::RenderChunkGeometry const* geometry) {
     std::lock_guard const guard(gAnimMutex);
     gReleasedMesh.erase(geometry);
     gStaleMesh.erase(geometry);
+    gProducedMesh.erase(geometry);
 }
 
 // Runs on the frame thread once the rebuilt geometry is live.
@@ -4302,10 +4624,21 @@ void meshBuildCommitted(::RenderChunkGeometry const* geometry) {
         }
         gPendingWatch.store(!gPendingRemesh.empty(), std::memory_order_relaxed);
     }
+#if OPTIPISTON_MC >= 2651
+    if (gStagedWatch.load(std::memory_order_relaxed)) {
+        std::lock_guard const guard(gAnimMutex);
+        noteStagedBuildLocked(geometry);
+    }
+#endif
     if (!gMeshWatch.load(std::memory_order_relaxed)) return;
     std::lock_guard const   guard(gAnimMutex);
     std::vector<::BlockPos> released;
     std::vector<::BlockPos> staleSeen;
+    std::vector<::BlockPos> produced;
+    if (auto const found = gProducedMesh.find(geometry); found != gProducedMesh.end()) {
+        produced = std::move(found->second);
+        gProducedMesh.erase(found);
+    }
     if (auto const found = gReleasedMesh.find(geometry); found != gReleasedMesh.end()) {
         released = std::move(found->second);
         gReleasedMesh.erase(found);
@@ -4328,7 +4661,8 @@ void meshBuildCommitted(::RenderChunkGeometry const* geometry) {
             continue;
         }
         auto& timeline = found->second.timeline;
-        timeline.meshCommitted(frame);
+        timeline.meshCommitted(frame, kCommitShows);
+        stageCellLocked(geometry, found->first, timeline);
         // Shown from the next frame on, hence the extra step.
         auto const step = gFrameStep.load(std::memory_order_relaxed);
         auto const rate = gTicksPerSecond.load(std::memory_order_relaxed);
@@ -4362,8 +4696,17 @@ void meshBuildCommitted(::RenderChunkGeometry const* geometry) {
                 OPTIPISTON_PROBE_DO(gProbe.landReask.fetch_add(1, std::memory_order_relaxed);)
                 continue;
             }
-            rec.timeline.meshCommitted(frame);
-            OPTIPISTON_PROBE_DO(gProbe.cleanCommit.fetch_add(1, std::memory_order_relaxed);)
+            // Only a build that drew the cell's block may hand it to the mesh; a build that met the cell but drew
+            // nothing, or never visited it, says nothing and must not end the wait.
+            if (std::find(produced.begin(), produced.end(), cell) == produced.end()) {
+                OPTIPISTON_PROBE_DO(gProbe.emptyHeld.fetch_add(1, std::memory_order_relaxed);)
+                continue;
+            }
+            rec.timeline.meshCommitted(frame, kCommitShows);
+            stageCellLocked(geometry, cell, rec.timeline);
+            OPTIPISTON_PROBE_DO(gProbe.cleanCommit.fetch_add(1, std::memory_order_relaxed);
+                                gProbe.exactCommit.fetch_add(1, std::memory_order_relaxed);
+                                probeEmptyAsk(cell, rec.action, 0, true);)
             syncCellLocked(cell, rec, true);
         }
         if (again) gPendingWatch.store(true, std::memory_order_relaxed);
@@ -4806,15 +5149,17 @@ void commitProxyLocked(NewProxy& made, Graveyard& drop) {
     };
     if (source != made.pistonPos) {
         auto const old = gCells.find(source);
-        if (old != gCells.end() && old->second.action != made.action && !old->second.timeline.superseded()) {
+        // A newer action's record there holds a block that entered after this one left.
+        if (old != gCells.end() && old->second.action < made.action && !old->second.timeline.superseded()) {
             rec.carry = CarryVisual{old->second.action, old->second.visual};
             pure      = false;
             old->second.timeline.supersededBy(made.action);
             takeProxy(old->second, drop);
             syncCellLocked(source, old->second, true);
         } else if (auto const tail = gReplacedTails.find(source);
-                   tail != gReplacedTails.end() && tail->second.action == made.action) {
-            // A sibling of this action already replaced the cell the block comes from.
+                   tail != gReplacedTails.end() && tail->second.action >= made.action
+                   && tail->second.carry.action < made.action) {
+            // A sibling of this action, or a newer push into the cell, already replaced the cell the block comes from.
             rec.carry = tail->second.carry;
             pure      = false;
             OPTIPISTON_PROBE_DO(probeTailCarried(made.cell, source, tail->second.carry.action, made.action);)
@@ -5082,6 +5427,28 @@ void holdPlacedCell(::BlockSource& region, ::BlockPos const& cell) {
     flushLocked();
 }
 
+// The occluder's per-chunk bitset names no block, so it hides a suppressed neighbour like a plain solid one;
+// the face hook must answer the same for the face between two managed cells.
+bool faceAgainstSuppressedNeighbor(::BlockPos const& pos, int face, ::Block const& self) {
+    static constexpr int d[6][3]{
+        {0,  -1, 0 },
+        {0,  1,  0 },
+        {0,  0,  -1},
+        {0,  0,  1 },
+        {-1, 0,  0 },
+        {1,  0,  0 }
+    };
+    ::BlockPos const nb{pos.x + d[face][0], pos.y + d[face][1], pos.z + d[face][2]};
+    MeshViewPin pin;
+    auto const    kind = pin.get().at(cellOf(nb));
+    if (kind == core::MeshCell::Landed) return true;
+    if (kind != core::MeshCell::Approaching) return false;
+    ViewPin    view;
+    auto const it = view.get().cells.find(nb);
+    if (it == view.get().cells.end() || !it->second.wrapped) return false;
+    return self.getTypeName() == *it->second.wrapped;
+}
+
 // Chunk meshes skip faces against the target cell, but it stays empty on screen while the proxy is still gliding
 // in. Returns 0 if shown, 1 landed, 2 still a moving_block.
 int neighborHidden(::BlockPos const& pos) {
@@ -5193,6 +5560,13 @@ void advanceFrame() {
     std::lock_guard const guard(gAnimMutex);
     auto const            frame = gFrame.fetch_add(1, std::memory_order_relaxed) + 1;
     auto const            tick  = gLastTick.load(std::memory_order_relaxed);
+#if OPTIPISTON_MC >= 2651
+    bool       staged       = false;
+    auto const stagedFrames = std::max(
+        kStagedMinFrames,
+        static_cast<uint64_t>(kStagedSeconds / std::max(gFrameSeconds.load(std::memory_order_relaxed), 1.0e-4))
+    );
+#endif
     foldActorNotesLocked();
     for (auto& [pos, rec] : gCells) {
         if (rec.timeline.state() != PushState::Done) {
@@ -5215,9 +5589,25 @@ void advanceFrame() {
                 rec.timeline.cleared();
             }
         }
+#if OPTIPISTON_MC >= 2651
+        if (rec.timeline.awaitingShow()) {
+            if (frame > rec.timeline.commitFrame() + stagedFrames) {
+                rec.timeline.meshShown(frame);
+            } else {
+                staged = true;
+            }
+        }
+#endif
         rec.timeline.frameAdvanced(frame);
         syncCellLocked(pos, rec, false);
     }
+#if OPTIPISTON_MC >= 2651
+    if (!staged && gStagedWatch.load(std::memory_order_relaxed)) {
+        gStagedMesh.clear();
+        gStagedBuilds.clear();
+        gStagedWatch.store(false, std::memory_order_relaxed);
+    }
+#endif
     reapLocked(gLastTick.load(std::memory_order_relaxed), drop);
     settleLocked(drop);
 }
@@ -5286,6 +5676,7 @@ void drawProxies(::BaseActorRenderContext& context, bool renderAlphaLayer) {
             tProbePass = alphaLayer ? 1 : 0; probeProxyDispatched(proxy->mPosition.get(), tProbePass);
             if (alphaLayer) probeAlphaEarly(proxy->mPosition.get());
             tProbeProxyLight = ProbeProxyLight{true, proxy->mPosition.get(), 0, 0, 0};
+            for (auto& slot : tBlinkRel) slot = {};
             perf.pause();
         )
         dispatcher.render(context, region, *item, block, alphaLayer, forcedMat, nullptr, 0, {});
@@ -5298,7 +5689,8 @@ void drawProxies(::BaseActorRenderContext& context, bool renderAlphaLayer) {
     }
 }
 
-// Entries older than this many ticks are dropped once the tables grow, so destroyed pistons cannot pile up.
+// Entries older than this many rounds are dropped once the tables grow, so destroyed pistons cannot pile up.
+// Stepped pistons count level ticks; a head claim counts rendered frames. The window is intentionally unchanged.
 constexpr int64_t kHeadStaleTicks = 24000;
 constexpr size_t  kHeadPruneAt    = 4096;
 
@@ -5388,8 +5780,6 @@ LL_TYPE_INSTANCE_HOOK(
 }
 #endif
 
-// The round counter has to advance somewhere that runs once per game tick and independently of the render
-// framerate.
 LL_TYPE_INSTANCE_HOOK(
     OptiPistonPistonStepHook,
     ll::memory::HookPriority::Lowest,
@@ -5425,11 +5815,10 @@ LL_TYPE_INSTANCE_HOOK(
     refreshAttached(mPosition.get(), mAttachedBlocks.get());
     if (beforeP != mProgress || beforeLP != mLastProgress || beforeState != mState)
         markPistonStepped(this, static_cast<int64_t>(nowTick));
-    gHeadOwnerRound.store(static_cast<uint64_t>(nowTick), std::memory_order_relaxed);
 }
 
 #if OPTIPISTON_MC != 2620
-// getProgress is inlined into the renderer here, so the visual value is lent to the fields it reads.
+// The renderer reads the progress fields directly here, so the visual value is lent to them.
 class ProgressOverride {
 public:
     ProgressOverride(::BlockActor& entity, float alpha) {
@@ -5512,7 +5901,7 @@ void drawArm(
     bool const hidden  = interlock.mRenderVisibilityState == VisibilityState::InitialNotVisible;
 
     // Same-cell pistons cannot be found by walking the chunk collections - each instance only ever sees itself
-    // there - so one head per cell is elected here instead, fresh every round.
+    // there - so one head per cell is elected here instead, fresh every rendered frame.
     bool const isArm = entity.mType == ::BlockActorType::PistonArm;
     // Drawn by a MovingBlock carrying it; a replay can leave that cell as air instead of moving_block.
     bool const nested = tRenderDepth > 0;
@@ -5528,7 +5917,7 @@ void drawArm(
     // A nested head keeps its carrier's claim when the piston inside is rebuilt.
     auto const* const self = nested && tCarrier ? tCarrier : &entity;
     if (enabled && isArm) {
-        auto const round = gHeadOwnerRound.load(std::memory_order_relaxed);
+        auto const round = gFrame.load(std::memory_order_relaxed);
         auto&      owner = headTableFor(round).owners[entity.mPosition.get()];
         if (owner.round != round || owner.actor == nullptr || owner.actor == self) {
             owner = {round, self, &entity, isCargo};
@@ -5986,6 +6375,14 @@ LL_TYPE_INSTANCE_HOOK(
 #endif
 
 #if OPTIPISTON_MC >= 2651
+#if OPTIPISTON_MC >= 2660
+#define OPTIPISTON_STREAM_PLAN_PARAM ::RenderChunkVertexStreaming::RenderChunkVertexStreamPlanRegistry const& streamPlanRegistry,
+#define OPTIPISTON_STREAM_PLAN_ARG   streamPlanRegistry,
+#else
+#define OPTIPISTON_STREAM_PLAN_PARAM
+#define OPTIPISTON_STREAM_PLAN_ARG
+#endif
+
 LL_TYPE_INSTANCE_HOOK(
     OptiPistonEndRebuildHook,
     ll::memory::HookPriority::Normal,
@@ -5994,6 +6391,7 @@ LL_TYPE_INSTANCE_HOOK(
     void,
     ::RenderChunkBuilder&           builder,
     ::mce::BufferResourceService&   bufferResourceService,
+    OPTIPISTON_STREAM_PLAN_PARAM
     bool                            isBuilding,
     bool                            alreadyHadGeometry,
     ::dragon::RenderMetadata const& renderMetadata,
@@ -6001,10 +6399,32 @@ LL_TYPE_INSTANCE_HOOK(
 ) {
     OPTIPISTON_PROBE_DO(tProbeCommitChain = probeCallChain(); tProbeCommitBuilder = &builder;)
     OPTIPISTON_OBSERVE_DO(auto const observedCommitT0 = observe::commitBegin();)
-    origin(builder, bufferResourceService, isBuilding, alreadyHadGeometry, renderMetadata, useSplitStream);
+    origin(
+        builder,
+        bufferResourceService,
+        OPTIPISTON_STREAM_PLAN_ARG isBuilding,
+        alreadyHadGeometry,
+        renderMetadata,
+        useSplitStream
+    );
     OPTIPISTON_OBSERVE_DO(observe::buildCommit(this, observedCommitT0);)
     tMeshGeometry = nullptr;
     meshBuildCommitted(this);
+}
+
+LL_TYPE_INSTANCE_HOOK(
+    OptiPistonPromoteHook,
+    ll::memory::HookPriority::Normal,
+    RenderChunkInstanced,
+    &RenderChunkInstanced::promoteSortedGeometry,
+    void
+) {
+    origin();
+    if (!gStagedWatch.load(std::memory_order_relaxed)) return;
+    auto const* shown = mCurrentRenderChunkGeometry.get();
+    if (shown == nullptr) return;
+    std::lock_guard const guard(gAnimMutex);
+    showStagedLocked(shown);
 }
 #else
 LL_TYPE_INSTANCE_HOOK(
@@ -6038,7 +6458,13 @@ void onFrameEnd() {
             sweepActions(player->getDimensionBlockSource());
         }
     }
-    if (!gFrameDrewActors.exchange(false, std::memory_order_relaxed)) return;
+    if (!gFrameDrewActors.exchange(false, std::memory_order_relaxed)) {
+        OPTIPISTON_PROBE_DO(
+            if (gProbeAnyCell.load(std::memory_order_relaxed))
+                gProbe.unprobedFrames.fetch_add(1, std::memory_order_relaxed);
+        )
+        return;
+    }
     {
         OPTIPISTON_PERF_SCOPE(early, ReleaseEarly);
         releaseEarlyCells();
@@ -6296,7 +6722,8 @@ LL_TYPE_INSTANCE_HOOK(
 ) {
     OPTIPISTON_PERF_SCOPE(perf, MeshHook);
     OPTIPISTON_OBSERVE_DO(observe::tessellate(pos.x, pos.y, pos.z, &block);)
-    if (meshSuppressed(pos, block)) {
+    bool release = false;
+    if (meshSuppressed(pos, block, release)) {
         OPTIPISTON_PROBE_DO(probeMeshCall(true, pos, true);)
         OPTIPISTON_OBSERVE_DO(observe::tessellated(pos.x, pos.y, pos.z, &block, false, true);)
         return false;
@@ -6304,7 +6731,15 @@ LL_TYPE_INSTANCE_HOOK(
     OPTIPISTON_PROBE_DO(probeMeshCall(true, pos, false);)
     OPTIPISTON_PROBE_DO(perf.pause();)
     auto const result = origin(tessellator, block, pos, useCalcWithCache);
+    if (release) tessellatedForMesher(pos, result);
     OPTIPISTON_OBSERVE_DO(observe::tessellated(pos.x, pos.y, pos.z, &block, result, false);)
+    OPTIPISTON_PROBE_DO(if (tProbeProxyLight.active) {
+        auto const& own = tProbeProxyLight.cell;
+        if (pos.x == own.x && pos.y == own.y && pos.z == own.z) {
+            ++tProbeProxyLight.selfTess;
+            if (result) ++tProbeProxyLight.selfTessOk;
+        }
+    })
     OPTIPISTON_PROBE_DO(probeMeshTessellated(pos, block, result);)
     return result;
 }
@@ -6323,7 +6758,8 @@ LL_TYPE_INSTANCE_HOOK(
 ) {
     OPTIPISTON_PERF_SCOPE(perf, MeshHook);
     OPTIPISTON_OBSERVE_DO(observe::tessellate(pos.x, pos.y, pos.z, &block);)
-    if (meshSuppressed(pos, block)) {
+    bool release = false;
+    if (meshSuppressed(pos, block, release)) {
         OPTIPISTON_PROBE_DO(probeMeshCall(false, pos, true);)
         OPTIPISTON_OBSERVE_DO(observe::tessellated(pos.x, pos.y, pos.z, &block, false, true);)
         return false;
@@ -6332,7 +6768,15 @@ LL_TYPE_INSTANCE_HOOK(
     bool const noCache = airAndSimpleBlocks && touchesLanded(pos);
     OPTIPISTON_PROBE_DO(perf.pause();)
     auto const result = origin(tessellator, block, pos, faces, noCache ? nullptr : airAndSimpleBlocks);
+    if (release) tessellatedForMesher(pos, result);
     OPTIPISTON_OBSERVE_DO(observe::tessellated(pos.x, pos.y, pos.z, &block, result, false);)
+    OPTIPISTON_PROBE_DO(if (tProbeProxyLight.active) {
+        auto const& own = tProbeProxyLight.cell;
+        if (pos.x == own.x && pos.y == own.y && pos.z == own.z) {
+            ++tProbeProxyLight.selfTess;
+            if (result) ++tProbeProxyLight.selfTessOk;
+        }
+    })
     OPTIPISTON_PROBE_DO(probeMeshTessellated(pos, block, result);)
     return result;
 }
@@ -6395,8 +6839,8 @@ void removeHook(bool& installed) {
 #ifndef OPTIPISTON_LIGHT_LOG
 #define OPTIPISTON_LIGHT_LOG 0
 #endif
-#if OPTIPISTON_MC >= 2651
-// A user-provided copy constructor makes the compiler return it through a hidden pointer, like the game's BrightnessPair.
+#if OPTIPISTON_MC == 2651
+// The user-provided copy constructor gives it the same return convention as the game's BrightnessPair.
 struct LightRet {
     std::uint16_t v{}; // low byte sky, high byte block
 
@@ -6414,8 +6858,7 @@ using LightColorFn = LightRet (::BlockSource::*)(::BlockPos const&, std::uint8_t
 #endif
 
 #if OPTIPISTON_MC == 2651
-// ABI recovered from 1.26.51.01: pair returned through a hidden pointer, minBlockLight a plain byte. Outside an
-// ArmLightFixScope window this costs one thread-local read.
+// Outside an ArmLightFixScope window this costs one thread-local read.
 LL_TYPE_INSTANCE_HOOK(
     OptiPistonLightColorHook,
     ll::memory::HookPriority::Normal,
@@ -6452,19 +6895,42 @@ LL_TYPE_INSTANCE_HOOK(
         )
     }
     // A proxy stands in the cell the logic has already settled: once the real block is there the game stores 0/0
-    // for it and the moving copy renders dark. Keep the cell's own last lit answer for the rest of the animation.
+    // for it and the moving copy renders dark. Keep the last lit answer. Neighbors are not changed.
     auto const& proxyFix = tProxyLightFix;
     if (proxyFix.active && pos.x == proxyFix.cell.x && pos.y == proxyFix.cell.y && pos.z == proxyFix.cell.z) {
         if (raw.v != 0) {
             proxyFix.memory->store(raw.v, std::memory_order_relaxed);
         } else if (result.v == 0) {
             auto const kept = proxyFix.memory->load(std::memory_order_relaxed);
-            if (kept != 0) result.v = kept;
-            OPTIPISTON_PROBE_DO(
-                (kept != 0 ? gProbe.lightSelfFixed : gProbe.lightSelfNoMem).fetch_add(1, std::memory_order_relaxed);
-            )
+            if (kept != 0) {
+                result.v = kept;
+                OPTIPISTON_PROBE_DO(gProbe.lightSelfFixed.fetch_add(1, std::memory_order_relaxed);)
+            } else {
+                OPTIPISTON_PROBE_DO(gProbe.lightSelfNoMem.fetch_add(1, std::memory_order_relaxed);)
+            }
         }
     }
+    OPTIPISTON_PROBE_DO(if (tProbeProxyLight.active) {
+        bool const  rawDark = raw.v == 0;
+        bool const  resDark = result.v == 0;
+        auto const& own     = tProbeProxyLight.cell;
+        int const   dx      = pos.x - own.x;
+        int const   dy      = pos.y - own.y;
+        int const   dz      = pos.z - own.z;
+        int const   slot =
+            (dx >= -1 && dx <= 1 && dy >= -1 && dy <= 1 && dz >= -1 && dz <= 1) ? (dx + 1) * 9 + (dy + 1) * 3 + (dz + 1)
+                                                                                : 27;
+        auto& bucket = tBlinkRel[slot];
+        ++bucket.n;
+        if (rawDark) ++bucket.rawDark;
+        if (resDark) ++bucket.resDark;
+        if (dx == 0 && dy == 0 && dz == 0) {
+            if (resDark) ++tProbeProxyLight.resDarkSelf;
+        } else if (resDark) {
+            ++tProbeProxyLight.resDarkNb;
+        }
+        if (!resDark) ++tProbeProxyLight.resLit;
+    })
     OPTIPISTON_PROBE_DO(
         if (OPTIPISTON_LIGHT_LOG && (OPTIPISTON_LIGHT_HOOKS & 4) && tArmLightCtx.active) {
             int const sky   = raw.v & 0xFF;
@@ -6498,7 +6964,7 @@ bool gLightFixInstalled{};
 #define OPTIPISTON_REMOVE_LIGHT_FIX()  ((void)0)
 #endif
 
-#if OPTIPISTON_PROBE && OPTIPISTON_MC >= 2651 && OPTIPISTON_LIGHT_HOOKS
+#if OPTIPISTON_PROBE && OPTIPISTON_MC == 2651 && OPTIPISTON_LIGHT_HOOKS
 // Count the game's own light queries while an arm is drawn. Failing to install them is not fatal.
 LL_TYPE_INSTANCE_HOOK(
     OptiPistonLightBrightnessHook,
@@ -6535,27 +7001,12 @@ LL_TYPE_INSTANCE_HOOK(
 
 bool gLightHooks[3]{};
 
-void dumpLightTarget(char const* name, ll::memory::FuncPtr target, std::size_t count) {
-    auto const base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
-    auto const addr = reinterpret_cast<std::uintptr_t>(target);
-    auto const* src = reinterpret_cast<unsigned char const*>(addr);
-    char        hex[3 * 128 + 1]{};
-    for (std::size_t i = 0; i < count && i < 128; ++i) std::snprintf(hex + i * 3, 4, "%02x ", src[i]);
-    std::lock_guard const guard(gProbeMutex);
-    probeLineLocked("lightTarget %s rva=0x%llx bytes=%s\n", name, static_cast<unsigned long long>(addr - base), hex);
-}
-
 void installLightProbeHooks() {
-    dumpLightTarget("getBrightness", ll::memory::resolveIdentifier(&::BlockSource::$getBrightness), 64);
-    dumpLightTarget("getBrightnessPair", ll::memory::resolveIdentifier(reinterpret_cast<LightPairFn>(&::BlockSource::getBrightnessPair)), 64);
-    dumpLightTarget("getLightColor", ll::memory::resolveIdentifier(reinterpret_cast<LightColorFn>(&::BlockSource::getLightColor)), 128);
     if (OPTIPISTON_LIGHT_HOOKS & 1) (void)installHook<OptiPistonLightBrightnessHook>(gLightHooks[0]);
     if (OPTIPISTON_LIGHT_HOOKS & 2) (void)installHook<OptiPistonLightPairHook>(gLightHooks[1]);
-
 }
 
 void removeLightProbeHooks() {
-
     removeHook<OptiPistonLightPairHook>(gLightHooks[1]);
     removeHook<OptiPistonLightBrightnessHook>(gLightHooks[0]);
 }
@@ -6586,6 +7037,11 @@ void removeLightProbeHooks() {
 #else
 #define OPTIPISTON_START_REBUILD_HOOK(X)
 #endif
+#if OPTIPISTON_MC >= 2651
+#define OPTIPISTON_PROMOTE_HOOK(X) X(OptiPistonPromoteHook)
+#else
+#define OPTIPISTON_PROMOTE_HOOK(X)
+#endif
 
 #define OPTIPISTON_ALL_HOOKS(X)                                                                                        \
     X(OptiPistonPistonArmVisibilityHook)                                                                               \
@@ -6598,6 +7054,7 @@ void removeLightProbeHooks() {
     OPTIPISTON_START_REBUILD_HOOK(X)                                                                                   \
     X(OptiPistonRebuildHook)                                                                                           \
     X(OptiPistonEndRebuildHook)                                                                                        \
+    OPTIPISTON_PROMOTE_HOOK(X)                                                                                         \
     X(OptiPistonFrameHook)                                                                                             \
     X(OptiPistonPlayerQueueEntitiesHook)                                                                               \
     X(OptiPistonRenderBlockEntitiesHook)                                                                               \
@@ -6616,16 +7073,6 @@ struct HookEntry {
 constexpr HookEntry kHooks[] = {OPTIPISTON_ALL_HOOKS(OPTIPISTON_HOOK_ENTRY)};
 
 } // namespace
-
-bool observeMark(std::string const& label) {
-#if OPTIPISTON_OBSERVE
-    observe::mark(label);
-    return true;
-#else
-    (void)label;
-    return false;
-#endif
-}
 
 bool hookPistonRender(bool enable) {
     static bool installed[std::size(kHooks)]{};

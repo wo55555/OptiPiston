@@ -1,4 +1,4 @@
-// Stage S0 of the overlay rewrite, observation probes version 2 (r59), for the design in optipiston-design.md.
+// Stage S0 of the overlay rewrite, observation probes version 2, for the design in optipiston-design.md.
 //   P1  promote vs. block-actor draw order and thread (counters + per-period token signature)
 //   P2  does a build read the live chunk or a copy (counters + offset histogram)
 //   P3  geometry pointer / build version reuse
@@ -10,8 +10,7 @@
 //   P9  dirty -> build begin -> commit -> promote latencies (ms and ticks), tracked changes vs. other changes
 //   P10 per-frame cost census, hitch lines with a breakdown of what ran in the period
 //   P11 cause of every block change (packet, moving block tick, piston tick, other)
-//   P14 segments: /optipiston mark <label> closes the segment with summary lines and starts a new one
-// Everything is aggregated per segment; individual lines are limited per category and segment.
+// Everything is aggregated over the whole run, as one segment; individual lines are limited per category.
 #include "platform/bedrock/Observe.h"
 
 #if OPTIPISTON_OBSERVE
@@ -421,7 +420,6 @@ std::mutex gMain;
 
 Seg      gSeg;
 Fr       gFr;
-uint32_t gSegIndex    = 0;
 int64_t  gCurTick     = -1;
 int64_t  gHotTick     = -1;
 int      gLastMode    = -1;
@@ -2337,6 +2335,17 @@ LL_TYPE_INSTANCE_HOOK(
     onPromote(static_cast<void const*>(after), changed && after ? &pos : nullptr, changed, qpcMs(t1 - t0), phase);
 }
 
+#if OPTIPISTON_MC >= 2660
+// These observer hooks are unavailable on 26.60.
+struct ObserveUnavailableHook {
+    static int  hook() { return -1; }
+    static bool unhook() { return false; }
+};
+using ObserveBlockChangedHook = ObserveUnavailableHook;
+using ObserveMbaLoadHook      = ObserveUnavailableHook;
+using ObserveMbaUpdateHook    = ObserveUnavailableHook;
+using ObserveMbaTickHook      = ObserveUnavailableHook;
+#else
 LL_TYPE_INSTANCE_HOOK(
     ObserveBlockChangedHook,
     ll::memory::HookPriority::Normal,
@@ -2361,6 +2370,7 @@ LL_TYPE_INSTANCE_HOOK(
     origin(source, pos, layer, block, oldBlock, updateFlags, syncMsg, eventTarget, blockChangeSource);
     onBlockChange(pos, block, oldBlock, enter, qpcNow(), updateFlags);
 }
+#endif
 
 LL_TYPE_INSTANCE_HOOK(
     ObserveMbaCtorHook,
@@ -2376,6 +2386,7 @@ LL_TYPE_INSTANCE_HOOK(
     return result;
 }
 
+#if OPTIPISTON_MC < 2660
 LL_TYPE_INSTANCE_HOOK(
     ObserveMbaLoadHook,
     ll::memory::HookPriority::Normal,
@@ -2429,6 +2440,7 @@ LL_TYPE_INSTANCE_HOOK(
     gC.mbaTickRender.fetch_add(1, std::memory_order_relaxed);
     mbaTickEvent(*this);
 }
+#endif
 
 LL_TYPE_INSTANCE_HOOK(
     ObservePistonTickHook,
@@ -2538,7 +2550,7 @@ void install() {
         installHook<ObserveUpdateBlockSyncedHook>(gHooked[9]),
         installHook<ObserveQueueEntitiesHook>(gHooked[10]),
     };
-    std::string line = "install observe-v3 r63 shadow diag hooks:";
+    std::string line = "install observe-v3 shadow diag hooks:";
     for (int i = 0; i < kHooks; ++i) app(line, " %d", ok[i] ? 1 : 0);
     rawLog("%s\n", line.c_str());
     rawLog(
@@ -2868,26 +2880,6 @@ void buildCommit(void const* geometry, uint64_t commitBeginQpc) {
     if (gCommittedPos.size() > 8192) gCommittedPos.clear();
     gCommittedGeom[geometry] = res;
     gCommittedPos[res->pos]  = res;
-}
-
-void mark(std::string const& label) {
-    if (!gOn.load(std::memory_order_relaxed)) return;
-    std::lock_guard const guard(gMain);
-    segPrint("seg");
-    gSeg       = Seg{};
-    gSeg.index = ++gSegIndex;
-    gSeg.label = label;
-    gSeg.f0    = gFrame.load(std::memory_order_relaxed);
-    gSeg.q0    = qpcNow();
-    gSeg.lt0   = gCurTick;
-    rawLog(
-        "mark #%u label=%s piston=%s lt=%lld cells=%zu\n",
-        gSegIndex,
-        label.c_str(),
-        modeName(modeIndex()),
-        static_cast<long long>(gCurTick),
-        gCells.size()
-    );
 }
 
 } // namespace optipiston::platform::observe

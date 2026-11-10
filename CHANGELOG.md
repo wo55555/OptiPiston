@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-10
+
+> Prerelease for every Minecraft line (26.10, 26.20, 26.30, 26.40, 26.50, 26.60). Install the variant for your line, for example `lip install github.com/wo55555/OptiPiston#client_mc26_50@0.3.0`. The configuration format and C API v1 are unchanged. The fixes have been tested in game on 26.50 only; the other lines build and pass unit tests. 26.60 is new and has not been run in game yet.
+
+### Added
+
+- Added support for Minecraft 26.60 (LeviLamina 26.60) as the Lip variant `client_mc26_60`. The arm lighting fix stays 26.50 only.
+
+### Changed
+
+- Widened the singleplayer world-speed range from 0.1x–10x to 0.01x–100x. New installs step through 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 4, 10, 20, 50, and 100.
+
+### Removed
+
+- Removed the diagnostic `/optipiston mark` command. It did nothing in published builds.
+
+### Fixed
+
+- Fixed a piston pulled back by another piston fighting a block pushed into its old cell. The pulled piston no longer takes over the newer block's animation.
+- Fixed a pushed block vanishing for a frame when the chunk rebuild produced no geometry for it yet.
+- Fixed a piston head briefly not drawn when its moving body and the head were claimed in different render frames of the same tick.
+- Fixed pushed blocks flickering on 26.50 when a finished chunk rebuild was shown a few frames later than it was built. The animation now holds until the game shows the rebuilt chunk.
+- Fixed a landed block whose chunk mesh never reported it staying drawn by the animation forever.
+
 ## [0.2.0] - 2026-10-22
 
 > Prerelease for every Minecraft line (26.10, 26.20, 26.30, 26.40, 26.50). Install the variant for your line, for example `lip install github.com/wo55555/OptiPiston#client_mc26_50@0.2.0`. If you installed an earlier `mc26_xx` variant, uninstall it first. The configuration format and C API v1 are unchanged. The render rewrite and both lighting fixes have been tested in game on 26.50 only; the other lines build and pass unit tests.
@@ -78,7 +102,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Singleplayer world speed with optional audio and particle scaling.
 - `/optipiston` client command and a C API for Playback's replay clock.
 
-[Unreleased]: https://github.com/wo55555/OptiPiston/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/wo55555/OptiPiston/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/wo55555/OptiPiston/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/wo55555/OptiPiston/compare/v0.1.4...v0.2.0
 [0.1.3]: https://github.com/wo55555/OptiPiston/compare/v0.1.2-mc26.20...v0.1.3
 [0.1.2-mc26.20]: https://github.com/wo55555/OptiPiston/compare/v0.1.1-mc26.20...v0.1.2-mc26.20

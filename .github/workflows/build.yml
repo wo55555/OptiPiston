@@ -17,6 +17,7 @@ jobs:
           - "26.30"
           - "26.40"
           - "26.50"
+          - "26.60"
     steps:
       - uses: actions/checkout@v7
         with:

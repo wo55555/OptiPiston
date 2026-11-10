@@ -11,13 +11,14 @@ local mc_lines = {
     ["26.30"] = {levilamina = "26.32", code = 2632},
     ["26.40"] = {levilamina = "26.40", code = 2640},
     ["26.50"] = {levilamina = "26.51", code = 2651},
+    ["26.60"] = {levilamina = "26.60", code = 2660},
 }
 
 option("mc")
     set_default("26.20")
     set_showmenu(true)
     set_description("Target Minecraft release line")
-    set_values("26.10", "26.20", "26.30", "26.40", "26.50")
+    set_values("26.10", "26.20", "26.30", "26.40", "26.50", "26.60")
 option_end()
 
 -- Temporary render diagnostics; turn off with --probe=n for frame-rate comparisons.

@@ -2337,6 +2337,17 @@ LL_TYPE_INSTANCE_HOOK(
     onPromote(static_cast<void const*>(after), changed && after ? &pos : nullptr, changed, qpcMs(t1 - t0), phase);
 }
 
+#if OPTIPISTON_MC >= 2660
+// These observer hooks are unavailable on 26.60.
+struct ObserveUnavailableHook {
+    static int  hook() { return -1; }
+    static bool unhook() { return false; }
+};
+using ObserveBlockChangedHook = ObserveUnavailableHook;
+using ObserveMbaLoadHook      = ObserveUnavailableHook;
+using ObserveMbaUpdateHook    = ObserveUnavailableHook;
+using ObserveMbaTickHook      = ObserveUnavailableHook;
+#else
 LL_TYPE_INSTANCE_HOOK(
     ObserveBlockChangedHook,
     ll::memory::HookPriority::Normal,
@@ -2361,6 +2372,7 @@ LL_TYPE_INSTANCE_HOOK(
     origin(source, pos, layer, block, oldBlock, updateFlags, syncMsg, eventTarget, blockChangeSource);
     onBlockChange(pos, block, oldBlock, enter, qpcNow(), updateFlags);
 }
+#endif
 
 LL_TYPE_INSTANCE_HOOK(
     ObserveMbaCtorHook,
@@ -2376,6 +2388,7 @@ LL_TYPE_INSTANCE_HOOK(
     return result;
 }
 
+#if OPTIPISTON_MC < 2660
 LL_TYPE_INSTANCE_HOOK(
     ObserveMbaLoadHook,
     ll::memory::HookPriority::Normal,
@@ -2429,6 +2442,7 @@ LL_TYPE_INSTANCE_HOOK(
     gC.mbaTickRender.fetch_add(1, std::memory_order_relaxed);
     mbaTickEvent(*this);
 }
+#endif
 
 LL_TYPE_INSTANCE_HOOK(
     ObservePistonTickHook,

@@ -140,6 +140,31 @@
             "preserve_files": [
                 "mods/OptiPiston/config/"
             ]
+        },
+        {
+            "label": "client_mc26_60",
+            "platform": "win-x64",
+            "dependencies": {
+                "github.com/LiteLDev/LeviLamina#client": "26.60.*"
+            },
+            "assets": [
+                {
+                    "type": "zip",
+                    "urls": [
+                        "https://{{tooth}}/releases/download/v{{version}}/OptiPiston-mc26.60-windows-x64.zip"
+                    ],
+                    "placements": [
+                        {
+                            "type": "dir",
+                            "src": "OptiPiston/",
+                            "dest": "mods/OptiPiston/"
+                        }
+                    ]
+                }
+            ],
+            "preserve_files": [
+                "mods/OptiPiston/config/"
+            ]
         }
     ]
 }

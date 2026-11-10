@@ -7,7 +7,7 @@
   <p>
     <img src="https://img.shields.io/badge/version-v0.2.0-4c8bf5?style=flat-square" alt="OptiPiston v0.2.0">
     <img src="https://img.shields.io/badge/Minecraft%20Bedrock-Windows%20x64-62b47a?style=flat-square" alt="Minecraft Bedrock for Windows x64">
-    <img src="https://img.shields.io/badge/LeviLamina-26.10%E2%80%9326.51-7b68ee?style=flat-square" alt="LeviLamina 26.10 to 26.51">
+    <img src="https://img.shields.io/badge/LeviLamina-26.10%E2%80%9326.60-7b68ee?style=flat-square" alt="LeviLamina 26.10 to 26.60">
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue?style=flat-square" alt="AGPL-3.0 license"></a>
   </p>
 
@@ -142,6 +142,7 @@ API v1 also reads and writes the piston toggle and duration. Setters clamp to th
 | 26.30          | `26.32.*`  | `client_mc26_30` | Prerelease; not yet tested in game    |
 | 26.40          | `26.40.*`  | `client_mc26_40` | Prerelease; not yet tested in game    |
 | 26.50          | `26.51.*`  | `client_mc26_50` | Prerelease; tested in game on `0.2.0` |
+| 26.60          | `26.60.*`  | `client_mc26_60` | Unreleased; not yet tested in game    |
 
 The arm lighting fix (no black arm or head after retracting with a block) is active on 26.50 only. Other lines keep the vanilla lighting until its native signature is verified there.
 
@@ -149,7 +150,7 @@ Every line ships in the same release, [`v0.2.0`](https://github.com/wo55555/Opti
 
 ## Build From Source
 
-OptiPiston builds on Windows x64 with xmake, LLVM (clang-cl, CI uses LLVM 22), and Git. `--mc` selects the release line from [Compatibility](#compatibility): `26.10`, `26.20`, `26.30`, `26.40`, or `26.50`. The `26.10` build uses MSVC (Visual Studio 2022) instead, because the rapidjson bundled with LeviLamina 26.10 does not compile under current clang.
+OptiPiston builds on Windows x64 with xmake, LLVM (clang-cl, CI uses LLVM 22), and Git. `--mc` selects the release line from [Compatibility](#compatibility): `26.10`, `26.20`, `26.30`, `26.40`, `26.50`, or `26.60`. The `26.10` build uses MSVC (Visual Studio 2022) instead, because the rapidjson bundled with LeviLamina 26.10 does not compile under current clang.
 
 ```powershell
 xmake f -c -y -p windows -a x64 -m release --target_type=client --mc=<line>

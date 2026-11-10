@@ -232,13 +232,21 @@ void unhookFmod() {
     gFmod.hooked = false;
 }
 
+#if OPTIPISTON_MC >= 2660
+#define OPTIPISTON_TIMER_PARAMS float preferredFrameStep, bool forceOnlySingleTick
+#define OPTIPISTON_TIMER_ARGS   preferredFrameStep, forceOnlySingleTick
+#else
+#define OPTIPISTON_TIMER_PARAMS float preferredFrameStep
+#define OPTIPISTON_TIMER_ARGS   preferredFrameStep
+#endif
+
 LL_TYPE_INSTANCE_HOOK(
     OptiPistonSimTimerHook,
     ll::memory::HookPriority::Normal,
     ::Timer,
     &::Timer::advanceTime,
     void,
-    float preferredFrameStep
+    OPTIPISTON_TIMER_PARAMS
 ) {
     auto const speed  = core::worldSpeedSettings().applied.load(std::memory_order_relaxed);
     bool       scaled = false;
@@ -263,7 +271,7 @@ LL_TYPE_INSTANCE_HOOK(
         scaled = gScaledTimers.contains(this);
     }
     if (speed != 1.0f) logTimerOnce(this, scaled);
-    origin(preferredFrameStep);
+    origin(OPTIPISTON_TIMER_ARGS);
 }
 
 LL_TYPE_INSTANCE_HOOK(

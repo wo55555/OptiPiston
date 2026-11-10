@@ -6375,6 +6375,14 @@ LL_TYPE_INSTANCE_HOOK(
 #endif
 
 #if OPTIPISTON_MC >= 2651
+#if OPTIPISTON_MC >= 2660
+#define OPTIPISTON_STREAM_PLAN_PARAM ::RenderChunkVertexStreaming::RenderChunkVertexStreamPlanRegistry const& streamPlanRegistry,
+#define OPTIPISTON_STREAM_PLAN_ARG   streamPlanRegistry,
+#else
+#define OPTIPISTON_STREAM_PLAN_PARAM
+#define OPTIPISTON_STREAM_PLAN_ARG
+#endif
+
 LL_TYPE_INSTANCE_HOOK(
     OptiPistonEndRebuildHook,
     ll::memory::HookPriority::Normal,
@@ -6383,6 +6391,7 @@ LL_TYPE_INSTANCE_HOOK(
     void,
     ::RenderChunkBuilder&           builder,
     ::mce::BufferResourceService&   bufferResourceService,
+    OPTIPISTON_STREAM_PLAN_PARAM
     bool                            isBuilding,
     bool                            alreadyHadGeometry,
     ::dragon::RenderMetadata const& renderMetadata,
@@ -6390,7 +6399,14 @@ LL_TYPE_INSTANCE_HOOK(
 ) {
     OPTIPISTON_PROBE_DO(tProbeCommitChain = probeCallChain(); tProbeCommitBuilder = &builder;)
     OPTIPISTON_OBSERVE_DO(auto const observedCommitT0 = observe::commitBegin();)
-    origin(builder, bufferResourceService, isBuilding, alreadyHadGeometry, renderMetadata, useSplitStream);
+    origin(
+        builder,
+        bufferResourceService,
+        OPTIPISTON_STREAM_PLAN_ARG isBuilding,
+        alreadyHadGeometry,
+        renderMetadata,
+        useSplitStream
+    );
     OPTIPISTON_OBSERVE_DO(observe::buildCommit(this, observedCommitT0);)
     tMeshGeometry = nullptr;
     meshBuildCommitted(this);
@@ -6823,7 +6839,7 @@ void removeHook(bool& installed) {
 #ifndef OPTIPISTON_LIGHT_LOG
 #define OPTIPISTON_LIGHT_LOG 0
 #endif
-#if OPTIPISTON_MC >= 2651
+#if OPTIPISTON_MC == 2651
 // A user-provided copy constructor makes the compiler return it through a hidden pointer, like the game's BrightnessPair.
 struct LightRet {
     std::uint16_t v{}; // low byte sky, high byte block
@@ -6949,7 +6965,7 @@ bool gLightFixInstalled{};
 #define OPTIPISTON_REMOVE_LIGHT_FIX()  ((void)0)
 #endif
 
-#if OPTIPISTON_PROBE && OPTIPISTON_MC >= 2651 && OPTIPISTON_LIGHT_HOOKS
+#if OPTIPISTON_PROBE && OPTIPISTON_MC == 2651 && OPTIPISTON_LIGHT_HOOKS
 // Count the game's own light queries while an arm is drawn. Failing to install them is not fatal.
 LL_TYPE_INSTANCE_HOOK(
     OptiPistonLightBrightnessHook,

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added support for Minecraft 26.60 (LeviLamina 26.60). Diagnostic block-change and moving-block observers are unavailable on this version.
+
 ### Changed
 
 - Widened the singleplayer world-speed range from 0.1x–10x to 0.01x–100x. New installs step through 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 4, 10, 20, 50, and 100.

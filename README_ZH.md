@@ -7,7 +7,7 @@
   <p>
     <img src="https://img.shields.io/badge/version-v0.2.0-4c8bf5?style=flat-square" alt="OptiPiston v0.2.0">
     <img src="https://img.shields.io/badge/Minecraft%20Bedrock-Windows%20x64-62b47a?style=flat-square" alt="Windows x64 Minecraft 基岩版">
-    <img src="https://img.shields.io/badge/LeviLamina-26.10%E2%80%9326.51-7b68ee?style=flat-square" alt="LeviLamina 26.10 至 26.51">
+    <img src="https://img.shields.io/badge/LeviLamina-26.10%E2%80%9326.60-7b68ee?style=flat-square" alt="LeviLamina 26.10 至 26.60">
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue?style=flat-square" alt="AGPL-3.0 许可证"></a>
   </p>
 
@@ -142,6 +142,7 @@ API v1 还可以读写活塞动画开关和时长；设置值会限制在支持�
 | 26.30            | `26.32.*`  | `client_mc26_30` | 预发布，尚未实机测试          |
 | 26.40            | `26.40.*`  | `client_mc26_40` | 预发布，尚未实机测试          |
 | 26.50            | `26.51.*`  | `client_mc26_50` | 预发布，已在 `0.2.0` 实机测试 |
+| 26.60            | `26.60.*`  | `client_mc26_60` | 未发布，尚未实机测试          |
 
 回缩带方块后活塞臂和活塞头发黑的光照修复目前只在 26.50 上启用；其他版本线在验证其原生函数签名之前保持原版光照。
 
@@ -149,7 +150,7 @@ OptiPiston 面向 Windows x64 平台的 Minecraft 基岩版，以纯客户端模
 
 ## 从源码构建
 
-OptiPiston 使用 xmake、LLVM（clang-cl，CI 使用 LLVM 22）和 Git 在 Windows x64 上构建。`--mc` 选择[兼容性](#兼容性)中的版本线：`26.10`、`26.20`、`26.30`、`26.40` 或 `26.50`。`26.10` 改用 MSVC（Visual Studio 2022）构建，因为 LeviLamina 26.10 自带的 rapidjson 无法在当前 clang 下编译。
+OptiPiston 使用 xmake、LLVM（clang-cl，CI 使用 LLVM 22）和 Git 在 Windows x64 上构建。`--mc` 选择[兼容性](#兼容性)中的版本线：`26.10`、`26.20`、`26.30`、`26.40`、`26.50` 或 `26.60`。`26.10` 改用 MSVC（Visual Studio 2022）构建，因为 LeviLamina 26.10 自带的 rapidjson 无法在当前 clang 下编译。
 
 ```powershell
 xmake f -c -y -p windows -a x64 -m release --target_type=client --mc=<版本线>

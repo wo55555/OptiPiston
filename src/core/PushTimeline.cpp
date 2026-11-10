@@ -21,16 +21,24 @@ void PushTimeline::blockLanded() noexcept {
 
 bool PushTimeline::remeshRequested(double visualTime) noexcept {
     if (mState != PushState::Animating || !mLanded) return false;
-    mState      = PushState::Landing;
-    mRemeshTime = visualTime;
+    mState           = PushState::Landing;
+    mRemeshTime      = visualTime;
+    mLandingDeadline = mTick + DefaultLandingTicks;
     return true;
 }
 
-void PushTimeline::meshCommitted(uint64_t frame) noexcept {
+void PushTimeline::meshCommitted(uint64_t frame, bool shown) noexcept {
     // A build that went live before the request cannot contain the released block.
     if (mState != PushState::Landing || mCommitted) return;
     mCommitted   = true;
     mCommitFrame = frame;
+    if (shown) meshShown(frame);
+}
+
+void PushTimeline::meshShown(uint64_t frame) noexcept {
+    if (!awaitingShow()) return;
+    mShown      = true;
+    mShownFrame = frame;
 }
 
 void PushTimeline::frameAdvanced(uint64_t frame) noexcept {
@@ -102,6 +110,10 @@ bool PushTimeline::shouldRequestRemesh(double visualTime, double latency) const 
 }
 
 void PushTimeline::resolve() noexcept {
+    if (mState == PushState::Landing && !meshLive(mFrame) && mTick >= mLandingDeadline) {
+        finish(true, HandoverEnd::Timeout);
+        return;
+    }
     if (mState == PushState::Landing && meshLive(mFrame)) {
         if (!mCarriesActor) {
             finish(true, HandoverEnd::None);

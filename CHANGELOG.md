@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed a piston pulled back by another piston fighting a block pushed into its old cell. The pulled piston no longer takes over the newer block's animation.
 - Fixed a pushed block vanishing for a frame when the chunk rebuild produced no geometry for it yet.
 - Fixed a piston head briefly not drawn when its moving body and the head were claimed in different render frames of the same tick.
+- Fixed pushed blocks flickering on 26.50 when a finished chunk rebuild was shown a few frames later than it was built. The animation now holds until the game shows the rebuilt chunk.
+- Fixed a landed block whose chunk mesh never reported it staying drawn by the animation forever.
 
 ## [0.2.0] - 2026-10-22
 

@@ -42,6 +42,9 @@
 #include "mc/client/renderer/blockactor/PistonBlockActorRenderer.h"
 #include "mc/client/renderer/chunks/RenderChunkCoordinator.h"
 #include "mc/client/renderer/chunks/RenderChunkGeometry.h"
+#if OPTIPISTON_MC >= 2651
+#include "mc/client/renderer/chunks/RenderChunkInstanced.h"
+#endif
 #include "mc/client/renderer/game/LevelRenderer.h"
 #include "mc/client/renderer/game/LevelRendererCamera.h"
 #include "mc/client/renderer/game/LevelRendererPlayer.h"
@@ -711,6 +714,23 @@ std::unordered_map<::RenderChunkGeometry const*, ::BlockPos>              gBuild
 std::unordered_map<::RenderChunkGeometry const*, std::vector<::BlockPos>> gStaleRisk;
 // Landed cells found by the renderer; the next tick re-meshes them.
 std::vector<::BlockPos> gPendingRemesh;
+#if OPTIPISTON_MC >= 2651
+// A committed build waits for promoteSortedGeometry; a later build can show earlier cells in the same subchunk.
+struct StagedCell {
+    uint64_t   order;
+    ::BlockPos pos;
+};
+std::unordered_map<::BlockPos, std::vector<StagedCell>>     gStagedMesh;
+std::unordered_map<::RenderChunkGeometry const*, uint64_t> gStagedBuilds;
+uint64_t                                                    gStagedOrder = 0;
+std::atomic_bool                                            gStagedWatch{false};
+// An unpromoted build releases its proxy after the staging timeout.
+constexpr double   kStagedSeconds   = 0.25;
+constexpr uint64_t kStagedMinFrames = 2;
+constexpr bool     kCommitShows     = false;
+#else
+constexpr bool kCommitShows = true;
+#endif
 // Landed cells are re-meshed just before their motion ends, so the proxy does not have to cover the re-mesh. All in
 // visual ticks. Written by the render and frame threads without gAnimMutex, hence atomic.
 std::atomic<double>                   gLastVisualTime{0.0};
@@ -4432,13 +4452,27 @@ void staleToMesher(::BlockPos const& pos) {
     gStaleMesh[tMeshGeometry].push_back(pos);
 }
 
-// A released cell was tessellated. Only geometry shows the block; a release that produced none hands nothing over.
+// Empty geometry hands over only when all six neighbours are settled.
 void tessellatedForMesher(::BlockPos const& pos, bool produced) {
-    if (produced) {
-        releasedToMesher(pos);
-        return;
+    if (!produced) {
+        auto const& view = tBuild ? tBuild->view() : emptyMeshView();
+        static constexpr int d[6][3]{
+            {-1, 0,  0 },
+            {1,  0,  0 },
+            {0,  -1, 0 },
+            {0,  1,  0 },
+            {0,  0,  -1},
+            {0,  0,  1 }
+        };
+        bool settled = tBuild != nullptr;
+        for (int i = 0; settled && i < 6; ++i) {
+            auto const kind = view.at(cellOf(::BlockPos{pos.x + d[i][0], pos.y + d[i][1], pos.z + d[i][2]}));
+            settled         = kind != core::MeshCell::Landed && kind != core::MeshCell::Approaching;
+        }
+        OPTIPISTON_PROBE_DO(gProbe.emptyRelease.fetch_add(1, std::memory_order_relaxed); probeEmptyTess(pos);)
+        if (!settled) return;
     }
-    OPTIPISTON_PROBE_DO(gProbe.emptyRelease.fetch_add(1, std::memory_order_relaxed); probeEmptyTess(pos);)
+    releasedToMesher(pos);
 }
 
 // The mesh view says what to do for the cell; `kind` comes from one view, so the answer is self-consistent.
@@ -4485,6 +4519,46 @@ bool chunkHolds(::BlockPos const& origin, ::BlockPos const& cell) {
     return cell.x >= origin.x && cell.x < origin.x + kEdge && cell.y >= origin.y && cell.y < origin.y + kEdge
         && cell.z >= origin.z && cell.z < origin.z + kEdge;
 }
+
+// Caller holds gAnimMutex; stage a committed cell until its geometry is shown.
+void stageCellLocked(
+    [[maybe_unused]] ::RenderChunkGeometry const* geometry,
+    [[maybe_unused]] ::BlockPos const&            cell,
+    [[maybe_unused]] core::PushTimeline const&    timeline
+) {
+#if OPTIPISTON_MC >= 2651
+    if (!timeline.awaitingShow()) return;
+    auto const [build, fresh] = gStagedBuilds.try_emplace(geometry, gStagedOrder + 1);
+    if (fresh) ++gStagedOrder;
+    gStagedMesh[geometry->mPosition.get()].push_back({build->second, cell});
+    gStagedWatch.store(true, std::memory_order_relaxed);
+#endif
+}
+
+#if OPTIPISTON_MC >= 2651
+// Caller holds gAnimMutex; record a completed staged build.
+void noteStagedBuildLocked(::RenderChunkGeometry const* geometry) { gStagedBuilds[geometry] = ++gStagedOrder; }
+
+// Caller holds gAnimMutex; release cells when geometry is shown.
+void showStagedLocked(::RenderChunkGeometry const* geometry) {
+    auto const build = gStagedBuilds.find(geometry);
+    auto const found = gStagedMesh.find(geometry->mPosition.get());
+    if (build == gStagedBuilds.end() || found == gStagedMesh.end()) return;
+    auto const order = build->second;
+    gStagedBuilds.erase(build);
+    auto const frame = gFrame.load(std::memory_order_relaxed);
+    auto&      cells = found->second;
+    std::erase_if(cells, [&](StagedCell const& staged) {
+        if (staged.order > order) return false;
+        auto const it = gCells.find(staged.pos);
+        if (it == gCells.end()) return true;
+        it->second.timeline.meshShown(frame);
+        syncCellLocked(it->first, it->second, true);
+        return true;
+    });
+    if (cells.empty()) gStagedMesh.erase(found);
+}
+#endif
 
 // Caller holds gAnimMutex. A build that started before the cell existed may have baked its old block into the mesh.
 void flagStaleRiskLocked(::BlockPos const& cell, [[maybe_unused]] bool awaiting) {
@@ -4550,6 +4624,12 @@ void meshBuildCommitted(::RenderChunkGeometry const* geometry) {
         }
         gPendingWatch.store(!gPendingRemesh.empty(), std::memory_order_relaxed);
     }
+#if OPTIPISTON_MC >= 2651
+    if (gStagedWatch.load(std::memory_order_relaxed)) {
+        std::lock_guard const guard(gAnimMutex);
+        noteStagedBuildLocked(geometry);
+    }
+#endif
     if (!gMeshWatch.load(std::memory_order_relaxed)) return;
     std::lock_guard const   guard(gAnimMutex);
     std::vector<::BlockPos> released;
@@ -4581,7 +4661,8 @@ void meshBuildCommitted(::RenderChunkGeometry const* geometry) {
             continue;
         }
         auto& timeline = found->second.timeline;
-        timeline.meshCommitted(frame);
+        timeline.meshCommitted(frame, kCommitShows);
+        stageCellLocked(geometry, found->first, timeline);
         // Shown from the next frame on, hence the extra step.
         auto const step = gFrameStep.load(std::memory_order_relaxed);
         auto const rate = gTicksPerSecond.load(std::memory_order_relaxed);
@@ -4621,7 +4702,8 @@ void meshBuildCommitted(::RenderChunkGeometry const* geometry) {
                 OPTIPISTON_PROBE_DO(gProbe.emptyHeld.fetch_add(1, std::memory_order_relaxed);)
                 continue;
             }
-            rec.timeline.meshCommitted(frame);
+            rec.timeline.meshCommitted(frame, kCommitShows);
+            stageCellLocked(geometry, cell, rec.timeline);
             OPTIPISTON_PROBE_DO(gProbe.cleanCommit.fetch_add(1, std::memory_order_relaxed);
                                 gProbe.exactCommit.fetch_add(1, std::memory_order_relaxed);
                                 probeEmptyAsk(cell, rec.action, 0, true);)
@@ -5478,6 +5560,13 @@ void advanceFrame() {
     std::lock_guard const guard(gAnimMutex);
     auto const            frame = gFrame.fetch_add(1, std::memory_order_relaxed) + 1;
     auto const            tick  = gLastTick.load(std::memory_order_relaxed);
+#if OPTIPISTON_MC >= 2651
+    bool       staged       = false;
+    auto const stagedFrames = std::max(
+        kStagedMinFrames,
+        static_cast<uint64_t>(kStagedSeconds / std::max(gFrameSeconds.load(std::memory_order_relaxed), 1.0e-4))
+    );
+#endif
     foldActorNotesLocked();
     for (auto& [pos, rec] : gCells) {
         if (rec.timeline.state() != PushState::Done) {
@@ -5500,9 +5589,25 @@ void advanceFrame() {
                 rec.timeline.cleared();
             }
         }
+#if OPTIPISTON_MC >= 2651
+        if (rec.timeline.awaitingShow()) {
+            if (frame > rec.timeline.commitFrame() + stagedFrames) {
+                rec.timeline.meshShown(frame);
+            } else {
+                staged = true;
+            }
+        }
+#endif
         rec.timeline.frameAdvanced(frame);
         syncCellLocked(pos, rec, false);
     }
+#if OPTIPISTON_MC >= 2651
+    if (!staged && gStagedWatch.load(std::memory_order_relaxed)) {
+        gStagedMesh.clear();
+        gStagedBuilds.clear();
+        gStagedWatch.store(false, std::memory_order_relaxed);
+    }
+#endif
     reapLocked(gLastTick.load(std::memory_order_relaxed), drop);
     settleLocked(drop);
 }
@@ -6290,6 +6395,21 @@ LL_TYPE_INSTANCE_HOOK(
     tMeshGeometry = nullptr;
     meshBuildCommitted(this);
 }
+
+LL_TYPE_INSTANCE_HOOK(
+    OptiPistonPromoteHook,
+    ll::memory::HookPriority::Normal,
+    RenderChunkInstanced,
+    &RenderChunkInstanced::promoteSortedGeometry,
+    void
+) {
+    origin();
+    if (!gStagedWatch.load(std::memory_order_relaxed)) return;
+    auto const* shown = mCurrentRenderChunkGeometry.get();
+    if (shown == nullptr) return;
+    std::lock_guard const guard(gAnimMutex);
+    showStagedLocked(shown);
+}
 #else
 LL_TYPE_INSTANCE_HOOK(
     OptiPistonEndRebuildHook,
@@ -6917,6 +7037,11 @@ void removeLightProbeHooks() {
 #else
 #define OPTIPISTON_START_REBUILD_HOOK(X)
 #endif
+#if OPTIPISTON_MC >= 2651
+#define OPTIPISTON_PROMOTE_HOOK(X) X(OptiPistonPromoteHook)
+#else
+#define OPTIPISTON_PROMOTE_HOOK(X)
+#endif
 
 #define OPTIPISTON_ALL_HOOKS(X)                                                                                        \
     X(OptiPistonPistonArmVisibilityHook)                                                                               \
@@ -6929,6 +7054,7 @@ void removeLightProbeHooks() {
     OPTIPISTON_START_REBUILD_HOOK(X)                                                                                   \
     X(OptiPistonRebuildHook)                                                                                           \
     X(OptiPistonEndRebuildHook)                                                                                        \
+    OPTIPISTON_PROMOTE_HOOK(X)                                                                                         \
     X(OptiPistonFrameHook)                                                                                             \
     X(OptiPistonPlayerQueueEntitiesHook)                                                                               \
     X(OptiPistonRenderBlockEntitiesHook)                                                                               \

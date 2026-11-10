@@ -5818,7 +5818,7 @@ LL_TYPE_INSTANCE_HOOK(
 }
 
 #if OPTIPISTON_MC != 2620
-// getProgress is inlined into the renderer here, so the visual value is lent to the fields it reads.
+// The renderer reads the progress fields directly here, so the visual value is lent to them.
 class ProgressOverride {
 public:
     ProgressOverride(::BlockActor& entity, float alpha) {
@@ -6840,7 +6840,7 @@ void removeHook(bool& installed) {
 #define OPTIPISTON_LIGHT_LOG 0
 #endif
 #if OPTIPISTON_MC == 2651
-// A user-provided copy constructor makes the compiler return it through a hidden pointer, like the game's BrightnessPair.
+// The user-provided copy constructor gives it the same return convention as the game's BrightnessPair.
 struct LightRet {
     std::uint16_t v{}; // low byte sky, high byte block
 
@@ -6858,8 +6858,7 @@ using LightColorFn = LightRet (::BlockSource::*)(::BlockPos const&, std::uint8_t
 #endif
 
 #if OPTIPISTON_MC == 2651
-// ABI recovered from 1.26.51.01: pair returned through a hidden pointer, minBlockLight a plain byte. Outside an
-// ArmLightFixScope window this costs one thread-local read.
+// Outside an ArmLightFixScope window this costs one thread-local read.
 LL_TYPE_INSTANCE_HOOK(
     OptiPistonLightColorHook,
     ll::memory::HookPriority::Normal,
@@ -7002,27 +7001,12 @@ LL_TYPE_INSTANCE_HOOK(
 
 bool gLightHooks[3]{};
 
-void dumpLightTarget(char const* name, ll::memory::FuncPtr target, std::size_t count) {
-    auto const base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
-    auto const addr = reinterpret_cast<std::uintptr_t>(target);
-    auto const* src = reinterpret_cast<unsigned char const*>(addr);
-    char        hex[3 * 128 + 1]{};
-    for (std::size_t i = 0; i < count && i < 128; ++i) std::snprintf(hex + i * 3, 4, "%02x ", src[i]);
-    std::lock_guard const guard(gProbeMutex);
-    probeLineLocked("lightTarget %s rva=0x%llx bytes=%s\n", name, static_cast<unsigned long long>(addr - base), hex);
-}
-
 void installLightProbeHooks() {
-    dumpLightTarget("getBrightness", ll::memory::resolveIdentifier(&::BlockSource::$getBrightness), 64);
-    dumpLightTarget("getBrightnessPair", ll::memory::resolveIdentifier(reinterpret_cast<LightPairFn>(&::BlockSource::getBrightnessPair)), 64);
-    dumpLightTarget("getLightColor", ll::memory::resolveIdentifier(reinterpret_cast<LightColorFn>(&::BlockSource::getLightColor)), 128);
     if (OPTIPISTON_LIGHT_HOOKS & 1) (void)installHook<OptiPistonLightBrightnessHook>(gLightHooks[0]);
     if (OPTIPISTON_LIGHT_HOOKS & 2) (void)installHook<OptiPistonLightPairHook>(gLightHooks[1]);
-
 }
 
 void removeLightProbeHooks() {
-
     removeHook<OptiPistonLightPairHook>(gLightHooks[1]);
     removeHook<OptiPistonLightBrightnessHook>(gLightHooks[0]);
 }

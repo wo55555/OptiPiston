@@ -725,14 +725,12 @@ std::atomic<uint64_t> gFrame{1};
 std::atomic_bool      gFrameDrewActors{false};
 // Chunk geometry being tessellated on this thread.
 thread_local ::RenderChunkGeometry const* tMeshGeometry = nullptr;
-// Positions of the managed cells whose tessellation produced geometry during the current build.
-thread_local std::unordered_set<::BlockPos, BlockPosHash> tMeshProduced;
 // Cells tessellated as real blocks after their re-mesh request, per build that has not been uploaded yet.
 std::unordered_map<::RenderChunkGeometry const*, std::vector<::BlockPos>> gReleasedMesh;
 // Cells a build met as awaiting but found the stand-in or air in its chunk copy: it cannot contain the block.
 std::unordered_map<::RenderChunkGeometry const*, std::vector<::BlockPos>> gStaleMesh;
-// Cells a build tessellated with geometry, awaiting that build's commit.
-std::unordered_map<::RenderChunkGeometry const*, std::vector<::BlockPos>> gProducedMesh;
+// Cells a build drew empty while a neighbour still animated; the neighbour's own re-mesh revisits them.
+std::unordered_map<::RenderChunkGeometry const*, std::vector<::BlockPos>> gHeldMesh;
 // Cells whose awaiting state was just published; builds in flight at that moment may not have seen it.
 std::vector<::BlockPos> gAwaitPublished;
 // Builds between start and commit, with the origin of their chunk; and the cells created while one was running.
@@ -815,15 +813,7 @@ public:
     }
     ~MeshBuildScope() {
         tBuild = mSaved;
-        bool const watch = gMeshWatch.load(std::memory_order_relaxed);
-        if (!tMeshProduced.empty()) {
-            std::lock_guard const guard(gAnimMutex);
-            auto&                     cells = gProducedMesh[mGeometry];
-            cells.reserve(cells.size() + tMeshProduced.size());
-            for (auto const& pos : tMeshProduced) cells.push_back(pos);
-        }
-        tMeshProduced.clear();
-        if ((mReleased.empty() && mStale.empty()) || !watch)
+        if ((mReleased.empty() && mStale.empty() && mHeld.empty()) || !gMeshWatch.load(std::memory_order_relaxed))
             return;
         std::lock_guard const guard(gAnimMutex);
         if (!mReleased.empty()) {
@@ -833,6 +823,10 @@ public:
         if (!mStale.empty()) {
             auto& list = gStaleMesh[mGeometry];
             list.insert(list.end(), mStale.begin(), mStale.end());
+        }
+        if (!mHeld.empty()) {
+            auto& list = gHeldMesh[mGeometry];
+            list.insert(list.end(), mHeld.begin(), mHeld.end());
         }
     }
     MeshBuildScope(MeshBuildScope const&)            = delete;
@@ -849,6 +843,7 @@ public:
     }
     void released(::BlockPos const& pos) { mReleased.push_back(pos); }
     void stale(::BlockPos const& pos) { mStale.push_back(pos); }
+    void held(::BlockPos const& pos) { mHeld.push_back(pos); }
 
 private:
     ::RenderChunkGeometry const*          mGeometry;
@@ -857,6 +852,7 @@ private:
     std::shared_ptr<core::MeshView const> mView;
     std::vector<::BlockPos>               mReleased;
     std::vector<::BlockPos>               mStale;
+    std::vector<::BlockPos>               mHeld;
 };
 
 // The current mesh view: the build's cached one on a mesh thread, otherwise a fresh load.
@@ -1068,6 +1064,7 @@ void flushLocked() {
     if (!awaiting) {
         if (!gReleasedMesh.empty()) gReleasedMesh.clear();
         if (!gStaleMesh.empty()) gStaleMesh.clear();
+        if (!gHeldMesh.empty()) gHeldMesh.clear();
     }
 }
 
@@ -1166,7 +1163,6 @@ struct ProbeCounters {
     // A released cell whose tessellation in a build produced no geometry.
     std::atomic<uint64_t> emptyRelease{0}; // such tessellations
     std::atomic<uint64_t> emptyHeld{0};    // awaiting cells kept waiting because their build drew nothing for them
-    std::atomic<uint64_t> exactCommit{0};  // awaiting cells handed to the mesh by a build that drew their block
     // What the renderer actually returned while a proxy was on screen. Cumulative.
     std::atomic<uint64_t> proxyTessFrames{0}; // Animating proxy frames whose own cell tessellated
     std::atomic<uint64_t> proxyEmpty{0};      // Animating proxy frames that drew with no geometry for the cell
@@ -2113,14 +2109,15 @@ void probeEmptyTess(::BlockPos const& pos) {
     );
 }
 
-// Caller holds gAnimMutex. An awaiting cell was handed to the mesh because its build drew the block.
-void probeEmptyAsk(::BlockPos const& pos, uint64_t action, int asks, bool accepted) {
+// Caller holds gAnimMutex. An awaiting cell was handed to a build that never visited it, or held by one that drew it
+// empty beside an animating neighbour.
+void probeEmptyAsk(::BlockPos const& pos, uint64_t action, bool accepted) {
     static std::atomic<uint64_t> lines{0};
     if (gProbePerfOnly.load(std::memory_order_relaxed) || lines.fetch_add(1, std::memory_order_relaxed) >= 200) return;
     std::lock_guard const guard(gProbeMutex);
     probeLineLocked(
         "%s cell=%d,%d,%d act=%llu\n",
-        accepted ? "exactCommitAt" : "emptyHeldAt",
+        accepted ? "cleanCommitAt" : "emptyHeldAt",
         pos.x,
         pos.y,
         pos.z,
@@ -4034,7 +4031,7 @@ void probeRealFrameEnd() {
             "armGapLen=%llu/%llu/%llu/%llu/%llu clkChecks=%llu clkBack=%llu clkStall=%llu clkSpread=%llu "
             "clkErr=%llu/%llu/%llu/%llu/%llu/%llu/%llu lightQueries=%llu lightFrames=%llu lightAnyDark=%llu "
             "lightSelfDark=%llu lightFlip=%llu lightSelfFixed=%llu lightSelfNoMem=%llu "
-            "emptyRelease=%llu emptyHeld=%llu exactCommit=%llu\n",
+            "emptyRelease=%llu emptyHeld=%llu\n",
             probeCount(gProbe.animCellFrames),
             probeCount(gProbe.zeroAnim),
             probeCount(gProbe.unpositioned),
@@ -4070,8 +4067,7 @@ void probeRealFrameEnd() {
             probeCount(gProbe.lightSelfFixed),
             probeCount(gProbe.lightSelfNoMem),
             probeCount(gProbe.emptyRelease),
-            probeCount(gProbe.emptyHeld),
-            probeCount(gProbe.exactCommit)
+            probeCount(gProbe.emptyHeld)
         );
         probeLineLocked(
             "blinkSum anim=%llu tess=%llu empty=%llu resDarkSelf=%llu resDarkNb=%llu allDark=%llu unprobed=%llu "
@@ -4271,6 +4267,7 @@ std::vector<::BlockPos> clearAnimationStateLocked(Graveyard& drop) {
     }
     gReleasedMesh.clear();
     gStaleMesh.clear();
+    gHeldMesh.clear();
     gAwaitPublished.clear();
     gClockTracker.reset();
     gMeshBuilder.clear();
@@ -4459,7 +4456,6 @@ void sweepActions(::BlockSource& region) {
 // A cell a mesh build tessellated as the real block after its re-mesh request. Counts only once the build is
 // uploaded; a superseded build never reaches endRebuild.
 void releasedToMesher(::BlockPos const& pos) {
-    tMeshProduced.insert(pos);
     if (tBuild) {
         tBuild->released(pos);
         return;
@@ -4480,7 +4476,7 @@ void staleToMesher(::BlockPos const& pos) {
     gStaleMesh[tMeshGeometry].push_back(pos);
 }
 
-// Empty geometry hands over only when all six neighbours are settled.
+// Empty geometry hands over only when all six neighbours are settled; otherwise the build holds the cell.
 void tessellatedForMesher(::BlockPos const& pos, bool produced) {
     if (!produced) {
         auto const& view = tBuild ? tBuild->view() : emptyMeshView();
@@ -4498,7 +4494,15 @@ void tessellatedForMesher(::BlockPos const& pos, bool produced) {
             settled         = kind != core::MeshCell::Landed && kind != core::MeshCell::Approaching;
         }
         OPTIPISTON_PROBE_DO(gProbe.emptyRelease.fetch_add(1, std::memory_order_relaxed); probeEmptyTess(pos);)
-        if (!settled) return;
+        if (!settled) {
+            if (tBuild) {
+                tBuild->held(pos);
+            } else if (tMeshGeometry) {
+                std::lock_guard const guard(gAnimMutex);
+                gHeldMesh[tMeshGeometry].push_back(pos);
+            }
+            return;
+        }
     }
     releasedToMesher(pos);
 }
@@ -4617,7 +4621,7 @@ void meshBuildStarted(::RenderChunkGeometry const* geometry) {
     std::lock_guard const guard(gAnimMutex);
     gReleasedMesh.erase(geometry);
     gStaleMesh.erase(geometry);
-    gProducedMesh.erase(geometry);
+    gHeldMesh.erase(geometry);
 }
 
 // Runs on the frame thread once the rebuilt geometry is live.
@@ -4633,6 +4637,8 @@ void meshBuildCommitted(::RenderChunkGeometry const* geometry) {
             origin  = flight->second;
             tracked = true;
             gBuildsInFlight.erase(flight);
+        } else if (geometry) {
+            origin = geometry->mPosition.get();
         }
         if (auto const found = gStaleRisk.find(geometry); found != gStaleRisk.end()) {
             risky = std::move(found->second);
@@ -4662,10 +4668,10 @@ void meshBuildCommitted(::RenderChunkGeometry const* geometry) {
     std::lock_guard const   guard(gAnimMutex);
     std::vector<::BlockPos> released;
     std::vector<::BlockPos> staleSeen;
-    std::vector<::BlockPos> produced;
-    if (auto const found = gProducedMesh.find(geometry); found != gProducedMesh.end()) {
-        produced = std::move(found->second);
-        gProducedMesh.erase(found);
+    std::vector<::BlockPos> held;
+    if (auto const found = gHeldMesh.find(geometry); found != gHeldMesh.end()) {
+        held = std::move(found->second);
+        gHeldMesh.erase(found);
     }
     if (auto const found = gReleasedMesh.find(geometry); found != gReleasedMesh.end()) {
         released = std::move(found->second);
@@ -4709,14 +4715,15 @@ void meshBuildCommitted(::RenderChunkGeometry const* geometry) {
         syncCellLocked(found->first, found->second, true);
     }
     // Cells of this chunk still awaiting a mesh were not tessellated as real blocks by this build. The wait ends
-    // here instead of on a timer: a build that started after the awaiting state was published and never visited
-    // the cell has nothing to show (the mesher skips it), so it is live; a build that may have started before,
-    // or that met a stale chunk copy, cannot tell, so the platform asks for a fresh one.
-    if (tracked && gCensus.any(core::TraitAwaiting)) {
+    // here, never on a timer: a build that started after the awaiting state was published and never visited the
+    // cell has nothing to show (the mesher skips it), so it is live. A build that may have started before, that met
+    // a stale chunk copy, or that went untracked cannot tell, so the platform asks for a fresh one. A cell the build
+    // drew empty beside a neighbour that still animates keeps waiting; that neighbour's re-mesh rebuilds it.
+    if (geometry && gCensus.any(core::TraitAwaiting)) {
         bool again = false;
         for (auto& [cell, rec] : gCells) {
             if (!rec.timeline.awaitingMesh() || !chunkHolds(origin, cell)) continue;
-            bool const unsure = std::find(risky.begin(), risky.end(), cell) != risky.end()
+            bool const unsure = !tracked || std::find(risky.begin(), risky.end(), cell) != risky.end()
                              || std::find(staleSeen.begin(), staleSeen.end(), cell) != staleSeen.end();
             if (unsure) {
                 gPendingRemesh.push_back(cell);
@@ -4724,17 +4731,15 @@ void meshBuildCommitted(::RenderChunkGeometry const* geometry) {
                 OPTIPISTON_PROBE_DO(gProbe.landReask.fetch_add(1, std::memory_order_relaxed);)
                 continue;
             }
-            // Only a build that drew the cell's block may hand it to the mesh; a build that met the cell but drew
-            // nothing, or never visited it, says nothing and must not end the wait.
-            if (std::find(produced.begin(), produced.end(), cell) == produced.end()) {
-                OPTIPISTON_PROBE_DO(gProbe.emptyHeld.fetch_add(1, std::memory_order_relaxed);)
+            if (std::find(held.begin(), held.end(), cell) != held.end()) {
+                OPTIPISTON_PROBE_DO(gProbe.emptyHeld.fetch_add(1, std::memory_order_relaxed);
+                                    probeEmptyAsk(cell, rec.action, false);)
                 continue;
             }
             rec.timeline.meshCommitted(frame, kCommitShows);
             stageCellLocked(geometry, cell, rec.timeline);
             OPTIPISTON_PROBE_DO(gProbe.cleanCommit.fetch_add(1, std::memory_order_relaxed);
-                                gProbe.exactCommit.fetch_add(1, std::memory_order_relaxed);
-                                probeEmptyAsk(cell, rec.action, 0, true);)
+                                probeEmptyAsk(cell, rec.action, true);)
             syncCellLocked(cell, rec, true);
         }
         if (again) gPendingWatch.store(true, std::memory_order_relaxed);

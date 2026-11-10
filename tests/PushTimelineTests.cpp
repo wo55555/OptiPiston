@@ -164,21 +164,6 @@ TEST_CASE("a committed mesh hands over only once the game shows it") {
     }
 }
 
-TEST_CASE("a landed cell whose mesh never reports the block goes to the mesh at the landing deadline") {
-    Scene scene(10, 2.0f, false);
-    scene.latency = 1.0e9; // no build ever draws the block
-    scene.runUntilTick(11);
-    scene.land();
-    scene.runUntilTick(13);
-    REQUIRE(scene.timeline.state() == PushState::Landing);
-    scene.runUntilTick(12 + DefaultLandingTicks - 2);
-    CHECK(scene.timeline.state() == PushState::Landing);
-    scene.runUntilTick(12 + DefaultLandingTicks + 2);
-    CHECK(scene.timeline.state() == PushState::Done);
-    CHECK(scene.timeline.handoverEnd() == HandoverEnd::Timeout);
-    CHECK(scene.zeroFrames == 0);
-}
-
 TEST_CASE("the mesh is suppressed only between landing and the re-mesh request") {
     Scene scene(10, 4.0f, false);
     CHECK_FALSE(scene.timeline.meshSuppressed());
@@ -282,13 +267,13 @@ TEST_CASE("a handover ends at once when the landed actor was already drawing") {
     CHECK(scene.mismatches == 0);
 }
 
-TEST_CASE("a landed block waits for its mesh until the landing deadline") {
+TEST_CASE("a landed block keeps its proxy until its mesh is live, however long that takes") {
     for (bool actor : {false, true}) {
         Scene scene(100, 3.0f, actor);
         scene.latency = 1.0e6;
         scene.runUntilTick(101);
         scene.land();
-        scene.runUntilTick(100 + DefaultLandingTicks - 5);
+        scene.runUntilTick(2000);
         CHECK(scene.timeline.state() == PushState::Landing);
         CHECK(scene.timeline.drawer(scene.frame) == PushDrawer::Proxy);
         scene.timeline.meshCommitted(scene.frame);

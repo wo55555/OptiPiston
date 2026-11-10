@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Fixed a pushed block disappearing when another piston pushed it again before its first push had finished.
+- Fixed large piston machines briefly leaving holes, or seeming to finish at once, at high world speeds or while the game was slow to rebuild chunks. A landed block now keeps its animation until a chunk rebuild shows it, with no time limit.
 
 ## [0.3.0] - 2026-11-10
 

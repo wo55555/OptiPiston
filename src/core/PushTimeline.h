@@ -26,8 +26,6 @@ inline constexpr uint64_t DefaultHandoverTicks = 4;
 // How long a cell whose visual already ended keeps drawing at its end pose while the real block has not landed.
 // A busy machine lands its blocks well over ten ticks late; the world poll ends the wait early when the cell is empty.
 inline constexpr int64_t DefaultOverrunTicks = 100;
-// Maximum wait before a requested re-mesh hands the cell to the mesh.
-inline constexpr int64_t DefaultLandingTicks = 100;
 
 // One pushed cell. Pure state, so the single-drawer rule can be tested without the game.
 class PushTimeline {
@@ -117,7 +115,6 @@ private:
     int64_t     mTick{};
     int64_t     mDeadline{};
     int64_t     mOverrunDeadline{};
-    int64_t     mLandingDeadline{};
     int64_t     mLandTick{};
     uint64_t    mHandoverTicks{DefaultHandoverTicks};
     double      mRemeshTime{};

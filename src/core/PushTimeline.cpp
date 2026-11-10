@@ -21,9 +21,8 @@ void PushTimeline::blockLanded() noexcept {
 
 bool PushTimeline::remeshRequested(double visualTime) noexcept {
     if (mState != PushState::Animating || !mLanded) return false;
-    mState           = PushState::Landing;
-    mRemeshTime      = visualTime;
-    mLandingDeadline = mTick + DefaultLandingTicks;
+    mState      = PushState::Landing;
+    mRemeshTime = visualTime;
     return true;
 }
 
@@ -110,10 +109,6 @@ bool PushTimeline::shouldRequestRemesh(double visualTime, double latency) const 
 }
 
 void PushTimeline::resolve() noexcept {
-    if (mState == PushState::Landing && !meshLive(mFrame) && mTick >= mLandingDeadline) {
-        finish(true, HandoverEnd::Timeout);
-        return;
-    }
     if (mState == PushState::Landing && meshLive(mFrame)) {
         if (!mCarriesActor) {
             finish(true, HandoverEnd::None);

@@ -172,6 +172,35 @@ bool wrappedAir(::MovingBlockActor const& moving) {
 
 std::shared_ptr<::BlockActor>& wrappedActorOf(::MovingBlockActor& moving) { return moving.mWrappedBlockActor; }
 
+std::shared_ptr<::BlockActor> const& wrappedActorOf(::MovingBlockActor const& moving) {
+    return moving.mWrappedBlockActor;
+}
+
+::Block const* wrappedBlockOf(::MovingBlockActor const& moving) { return moving.mWrappedBlock; }
+
+// A block pushed again before the client landed it is wrapped as the stand-in block holding the first push's instance.
+::MovingBlockActor const& carriedMoving(::MovingBlockActor const& moving) {
+    auto const* carried = &moving;
+    while (wrappedName(*carried) == "minecraft:moving_block") {
+        auto const& inner = wrappedActorOf(*carried);
+        if (!inner || inner->mType != ::BlockActorType::MovingBlock) break;
+        carried = static_cast<::MovingBlockActor const*>(inner.get());
+    }
+    return *carried;
+}
+
+// The carried block's own actor; a first push's instance left on a block the game read again is not one.
+std::shared_ptr<::BlockActor> const& carriedActorOf(::MovingBlockActor const& carried) {
+    static std::shared_ptr<::BlockActor> const none;
+    auto const&                                actor = wrappedActorOf(carried);
+    return actor && actor->mType == ::BlockActorType::MovingBlock ? none : actor;
+}
+
+// While the game reads the instance again it passes through air or an empty stand-in.
+bool carriesBlock(::MovingBlockActor const& carried) {
+    return !wrappedAir(carried) && wrappedName(carried) != "minecraft:moving_block";
+}
+
 ::PistonBlockActor* owningPiston(::MovingBlockActor& moving, ::BlockSource& region) {
 #if OPTIPISTON_MC == 2620
     return moving.getOwningPiston(region);
@@ -5044,9 +5073,12 @@ SnapshotPlan planSnapshot(StateRef const& state, ::MovingBlockActor const& movin
     plan.action = piston->second.action;
     if (auto const known = state.cells.find(moving.mPosition.get());
         known != state.cells.end() && known->second.action == plan.action) {
-        // The game rebuilds the carried actor mid-push; the proxy follows the live instance.
-        auto const& proxy = known->second.proxy;
-        if (!proxy || proxy->mWrappedBlockActor == moving.mWrappedBlockActor) return plan;
+        // The game rebuilds the carried block and actor mid-push; the proxy follows the live instance.
+        auto const& proxy   = known->second.proxy;
+        auto const& carried = carriedMoving(moving);
+        if (!proxy || !carriesBlock(carried)
+            || (wrappedActorOf(*proxy) == carriedActorOf(carried) && wrappedBlockOf(*proxy) == wrappedBlockOf(carried)))
+            return plan;
         plan.existing = proxy;
         plan.kind     = SnapshotPlan::Kind::Follow;
         return plan;
@@ -5082,17 +5114,18 @@ NewProxy buildProxy(::MovingBlockActor& moving, SnapshotPlan const& plan) {
     made.action    = plan.action;
     made.visual    = plan.visual;
     OPTIPISTON_PROBE_DO(made.startFrame = plan.startFrame;)
-    auto proxy                       = std::shared_ptr<::MovingBlockActor>(new ::MovingBlockActor(made.cell));
-    proxy->mWrappedBlock             = moving.mWrappedBlock;
-    proxy->mWrappedExtraBlock        = moving.mWrappedExtraBlock;
-    wrappedActorOf(*proxy)           = wrappedActorOf(moving);
+    auto const& carried              = carriedMoving(moving);
+    auto        proxy                = std::shared_ptr<::MovingBlockActor>(new ::MovingBlockActor(made.cell));
+    proxy->mWrappedBlock             = carried.mWrappedBlock;
+    proxy->mWrappedExtraBlock        = carried.mWrappedExtraBlock;
+    wrappedActorOf(*proxy)           = carriedActorOf(carried);
     proxy->mPistonBlockPos.get()     = made.pistonPos;
     proxy->mPistonBlockExpanding     = moving.mPistonBlockExpanding;
     auto& interlock                  = interlockOf(*proxy);
     interlock.mRenderVisibilityState = VisibilityState::Visible;
     interlock.mHasBeenDelayedDeleted = false;
-    made.carriesActor                = wrappedActorOf(moving) != nullptr;
-    made.wrapped                     = std::make_shared<std::string>(wrappedName(moving));
+    made.carriesActor                = carriedActorOf(carried) != nullptr;
+    made.wrapped                     = std::make_shared<std::string>(wrappedName(carried));
     made.proxy                       = std::move(proxy);
     return made;
 }
@@ -5223,8 +5256,11 @@ std::size_t commitProxies(NewProxy* made, std::size_t count) {
     return created;
 }
 
-void followGameActor(::MovingBlockActor& moving, SnapshotPlan const& plan) {
-    wrappedActorOf(*plan.existing) = wrappedActorOf(moving);
+void followGameActor(::MovingBlockActor const& moving, SnapshotPlan const& plan) {
+    auto const& carried               = carriedMoving(moving);
+    plan.existing->mWrappedBlock      = carried.mWrappedBlock;
+    plan.existing->mWrappedExtraBlock = carried.mWrappedExtraBlock;
+    wrappedActorOf(*plan.existing)    = carriedActorOf(carried);
 }
 
 // Creates the proxy for a game MovingBlock of a live action, or refreshes the one it already has. Returns true if a

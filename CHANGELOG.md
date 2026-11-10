@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed a pushed block disappearing when another piston pushed it again before its first push had finished.
+
 ## [0.3.0] - 2026-11-10
 
 > Prerelease for every Minecraft line (26.10, 26.20, 26.30, 26.40, 26.50, 26.60). Install the variant for your line, for example `lip install github.com/wo55555/OptiPiston#client_mc26_50@0.3.0`. The configuration format and C API v1 are unchanged. The fixes have been tested in game on 26.50 only; the other lines build and pass unit tests. 26.60 is new and has not been run in game yet.

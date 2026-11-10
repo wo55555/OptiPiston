@@ -135,16 +135,16 @@ API v1 also reads and writes the piston toggle and duration. Setters clamp to th
 
 ## Compatibility
 
-| Minecraft line | LeviLamina | Lip variant      | Status                                |
-| -------------- | ---------- | ---------------- | ------------------------------------- |
-| 26.10          | `26.10.*`  | `client_mc26_10` | Prerelease; not yet tested in game    |
-| 26.20          | `26.20.*`  | `client_mc26_20` | Prerelease; tested in game on `0.1.0` |
-| 26.30          | `26.32.*`  | `client_mc26_30` | Prerelease; not yet tested in game    |
-| 26.40          | `26.40.*`  | `client_mc26_40` | Prerelease; not yet tested in game    |
-| 26.50          | `26.51.*`  | `client_mc26_50` | Prerelease; tested in game on `0.3.0` |
-| 26.60          | `26.60.*`  | `client_mc26_60` | Prerelease; not yet tested in game    |
+| Minecraft line | LeviLamina | Lip variant      | Status                                   |
+| -------------- | ---------- | ---------------- | ---------------------------------------- |
+| 26.10          | `26.10.*`  | `client_mc26_10` | Prerelease; tested in game after `0.3.0` |
+| 26.20          | `26.20.*`  | `client_mc26_20` | Prerelease; tested in game after `0.3.0` |
+| 26.30          | `26.32.*`  | `client_mc26_30` | Prerelease; not yet tested in game       |
+| 26.40          | `26.40.*`  | `client_mc26_40` | Prerelease; tested in game after `0.3.0` |
+| 26.50          | `26.51.*`  | `client_mc26_50` | Prerelease; tested in game after `0.3.0` |
+| 26.60          | `26.60.*`  | `client_mc26_60` | Prerelease; not yet tested in game       |
 
-The arm lighting fix (no black arm or head after retracting with a block) is active on 26.50 only. Other lines keep the vanilla lighting until its native signature is verified there.
+Builds after `0.3.0` have the same features on every line, including the arm lighting fix (no black arm or head after retracting with a block); in `0.3.0` that fix is active on 26.50 only. One step is specific to 26.50 and 26.60: there the game shows a rebuilt chunk a few frames after building it, and the animation waits for that handover. The older lines showed no such gap in testing.
 
 Every line ships in the same release, [`v0.3.0`](https://github.com/wo55555/OptiPiston/releases/tag/v0.3.0), as its own asset `OptiPiston-mc<line>-windows-x64.zip`; each build only loads on the listed LeviLamina version. All currently published releases are prereleases. OptiPiston targets Minecraft Bedrock for Windows x64 and is distributed as a client-only mod.
 
@@ -176,8 +176,8 @@ The package version is `optipiston_version` in `xmake.lua`; the mod manifest add
 
 ## Known Limitations
 
-- Only 26.20 has been tested in game. The other versions are ported from the LeviLamina headers and only verified to build.
-- Outside 26.20, some hooks use different entry points: the frame counter follows `LevelRenderer::renderLevel`, and the arm's visual progress applies only while the arm is drawn. From 26.32 the camera no longer looks up a block per block actor, so the step that keeps a held moving block drawn after its real block lands is skipped. These paths may differ slightly at the start or end of a move.
+- 26.30 and 26.60 have not been run in game. They are ported from the LeviLamina headers, build, and pass the unit tests.
+- The lines reach the same steps through different entry points. Outside 26.20 the frame counter follows `LevelRenderer::renderLevel` and the arm's visual progress applies only while the arm is drawn; 26.10 intercepts both piston renderers where the game dispatches them. These paths may differ slightly at the start or end of a move.
 - Tested in local worlds and Playback replays; multiplayer servers are not yet verified.
 - Blocks moved by a piston can flicker darker while moving. Vanilla does the same; it is not fixed yet.
 - World speed is singleplayer only and does not persist across restarts.

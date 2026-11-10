@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The arm lighting fix (no black arm or head after retracting with a block) now works on every line instead of 26.50 only. Tested in game on 26.10, 26.20, 26.40, and 26.50; 26.30 and 26.60 build and pass unit tests.
+
 ### Fixed
 
 - Fixed a pushed block disappearing when another piston pushed it again before its first push had finished.

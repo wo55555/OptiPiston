@@ -78,6 +78,7 @@
 #include "mc/world/phys/AABB.h"
 
 #if OPTIPISTON_MC == 2610
+#include "mc/client/renderer/ActorShaderManager.h"
 #include "mc/client/renderer/chunks/RenderChunkBuilder.h"
 #include "mc/world/level/block/PistonBlock.h"
 #include "mc/world/level/block/VanillaStates.h"
@@ -282,7 +283,6 @@ thread_local int tRenderDepth = 0;
 // The proxy being dispatched by drawProxies on this thread.
 thread_local ::BlockActor const* tProxyDraw = nullptr;
 
-#if OPTIPISTON_MC == 2651
 // Set around one proxy dispatch: the cell the proxy stands in and where the last lit answer for that cell is kept.
 struct ProxyLightFix {
     bool                   active{};
@@ -290,7 +290,6 @@ struct ProxyLightFix {
     std::atomic<uint16_t>* memory{};
 };
 thread_local ProxyLightFix tProxyLightFix;
-#endif
 
 struct RenderScope {
     RenderScope() { ++tRenderDepth; }
@@ -1157,7 +1156,7 @@ struct ProbeCounters {
     std::atomic<uint64_t> posChecks{0};      // an Animating proxy compared with its position on the previous frame
     std::atomic<uint64_t> posJump{0};        // it moved over twice as far as the visual time that passed allows
     std::atomic<uint64_t> posBack{0};        // it moved away from its cell while the visual time moved forward
-    std::atomic<uint64_t> lightQueries{0};   // light queries seen inside proxy dispatches (positive control; 26.50 only)
+    std::atomic<uint64_t> lightQueries{0};   // light queries seen inside proxy dispatches (positive control)
     std::atomic<uint64_t> lightFrames{0};    // Animating proxy frames in which the light hook saw queries
     std::atomic<uint64_t> lightAnyDark{0};   // of those, frames in which some queried cell read 0/0
     std::atomic<uint64_t> lightSelfDark{0};  // of those, frames in which the proxy's own cell read 0/0
@@ -5705,9 +5704,7 @@ void drawProxies(::BaseActorRenderContext& context, bool renderAlphaLayer) {
             })
         }
         tProxyDraw = proxy.get();
-#if OPTIPISTON_MC == 2651
         tProxyLightFix = {true, proxy->mPosition.get(), &rec->shared->lightMemory};
-#endif
         OPTIPISTON_PROBE_DO(
             tProbePass = alphaLayer ? 1 : 0; probeProxyDispatched(proxy->mPosition.get(), tProbePass);
             if (alphaLayer) probeAlphaEarly(proxy->mPosition.get());
@@ -5717,9 +5714,7 @@ void drawProxies(::BaseActorRenderContext& context, bool renderAlphaLayer) {
         )
         dispatcher.render(context, region, *item, block, alphaLayer, forcedMat, nullptr, 0, {});
         OPTIPISTON_PROBE_DO(perf.resume(); probeProxyLightEnd(proxy->mPosition.get());)
-#if OPTIPISTON_MC == 2651
         tProxyLightFix = {};
-#endif
         tProxyDraw = nullptr;
         if (stripped) wrappedActorOf(*proxy).swap(stripped);
     }
@@ -5882,7 +5877,6 @@ private:
 };
 #endif
 
-#if OPTIPISTON_MC == 2651
 // The game lights an arm from its head cell. After the logic has landed a carried opaque block there, that cell
 // stores no light while our extended visual window still draws the arm, which then renders black. For the span of
 // one arm draw the head cell's light is raised to the piston cell's. Outside the span nothing is touched.
@@ -5917,7 +5911,6 @@ public:
 private:
     ArmLightFix mSaved;
 };
-#endif
 
 // Shared by the renderer hooks and, where those are not exported, the dispatcher hook. position is the draw's
 // own copy; draw() renders with whatever it holds.
@@ -6001,9 +5994,7 @@ void drawArm(
         if (!bodyOffset && !isCargo) bodyOffset = landedBodyOffset(entity.mPosition.get(), renderContext.mFrameAlpha);
     }
     OPTIPISTON_PROBE_DO(split.stage(ArmStage::Offset);)
-#if OPTIPISTON_MC == 2651
     ArmLightFixScope const lightFix(entity, renderSource, armAnimating);
-#endif
     OPTIPISTON_PROBE_DO(perf.pause();)
     if (!bodyOffset || (bodyOffset->x == 0.0f && bodyOffset->y == 0.0f && bodyOffset->z == 0.0f)) {
         OPTIPISTON_PROBE_DO(if (enabled && isArm) probeArmDrawn(entity.mPosition.get(), position, nested);)
@@ -6875,7 +6866,6 @@ void removeHook(bool& installed) {
 #ifndef OPTIPISTON_LIGHT_LOG
 #define OPTIPISTON_LIGHT_LOG 0
 #endif
-#if OPTIPISTON_MC == 2651
 // The user-provided copy constructor gives it the same return convention as the game's BrightnessPair.
 struct LightRet {
     std::uint16_t v{}; // low byte sky, high byte block
@@ -6891,9 +6881,7 @@ struct LightRet {
 };
 
 using LightColorFn = LightRet (::BlockSource::*)(::BlockPos const&, std::uint8_t) const;
-#endif
 
-#if OPTIPISTON_MC == 2651
 // Outside an ArmLightFixScope window this costs one thread-local read.
 LL_TYPE_INSTANCE_HOOK(
     OptiPistonLightColorHook,
@@ -6992,13 +6980,87 @@ LL_TYPE_INSTANCE_HOOK(
     return result;
 }
 
-bool gLightFixInstalled{};
-#define OPTIPISTON_INSTALL_LIGHT_FIX() (void)installHook<OptiPistonLightColorHook>(gLightFixInstalled)
-#define OPTIPISTON_REMOVE_LIGHT_FIX()  removeHook<OptiPistonLightColorHook>(gLightFixInstalled)
-#else
-#define OPTIPISTON_INSTALL_LIGHT_FIX() ((void)0)
-#define OPTIPISTON_REMOVE_LIGHT_FIX()  ((void)0)
+#if OPTIPISTON_MC == 2610
+using ShaderLightFn = void (*)(
+    ::ScreenContext&,
+    ::BlockSource&,
+    ::BrightnessPair const&,
+    ::glm::vec4 const&,
+    float,
+    bool,
+    ::LightTexture&,
+    ::Vec2 const&,
+    ::Vec4 const&
+);
+using ShaderLightHookFn = void (*)(
+    ::ScreenContext&,
+    ::BlockSource&,
+    LightRet const&,
+    ::glm::vec4 const&,
+    float,
+    bool,
+    ::LightTexture&,
+    ::Vec2 const&,
+    ::Vec4 const&
+);
+
+// This line hands a block actor's light straight to its shader, so both fixes are applied to that value instead.
+LL_TYPE_STATIC_HOOK(
+    OptiPistonShaderLightHook,
+    ll::memory::HookPriority::Normal,
+    ::ActorShaderManager,
+    reinterpret_cast<ShaderLightHookFn>(static_cast<ShaderLightFn>(&::ActorShaderManager::setupShaderParameters)),
+    void,
+    ::ScreenContext&   screenContext,
+    ::BlockSource&     source,
+    LightRet const&    lightColorUV,
+    ::glm::vec4 const& blockLightColor,
+    float              a,
+    bool               ignoreLighting,
+    ::LightTexture&    lightTexture,
+    ::Vec2 const&      uvScale,
+    ::Vec4 const&      uvAnim
+) {
+    LightRet    light = lightColorUV;
+    auto const& fix   = tArmLightFix;
+    if (fix.active) {
+        if (light.v == 0)
+            light = (source.*reinterpret_cast<LightColorFn>(&::BlockSource::getLightColor))(fix.piston, 0);
+        OPTIPISTON_PROBE_DO(gLightFixHeadQueries.fetch_add(1, std::memory_order_relaxed);
+                            if (lightColorUV.v == 0) gLightFixRawDark.fetch_add(1, std::memory_order_relaxed);
+                            if (light.v != lightColorUV.v) gLightFixRewrites.fetch_add(1, std::memory_order_relaxed);)
+    }
+    auto const& proxyFix = tProxyLightFix;
+    if (proxyFix.active) {
+        if (lightColorUV.v != 0) {
+            proxyFix.memory->store(lightColorUV.v, std::memory_order_relaxed);
+        } else if (light.v == 0) {
+            light.v = proxyFix.memory->load(std::memory_order_relaxed);
+            OPTIPISTON_PROBE_DO(
+                (light.v != 0 ? gProbe.lightSelfFixed : gProbe.lightSelfNoMem).fetch_add(1, std::memory_order_relaxed);
+            )
+        }
+    }
+    origin(screenContext, source, light, blockLightColor, a, ignoreLighting, lightTexture, uvScale, uvAnim);
+}
 #endif
+
+bool gLightFixInstalled[2]{};
+
+// Not fatal when a hook is missing: the arm then keeps the game's own light.
+void installLightFix() {
+    (void)installHook<OptiPistonLightColorHook>(gLightFixInstalled[0]);
+#if OPTIPISTON_MC == 2610
+    (void)installHook<OptiPistonShaderLightHook>(gLightFixInstalled[1]);
+#endif
+}
+
+void removeLightFix() {
+#if OPTIPISTON_MC == 2610
+    removeHook<OptiPistonShaderLightHook>(gLightFixInstalled[1]);
+#endif
+    removeHook<OptiPistonLightColorHook>(gLightFixInstalled[0]);
+}
 
 #if OPTIPISTON_PROBE && OPTIPISTON_MC == 2651 && OPTIPISTON_LIGHT_HOOKS
 // Count the game's own light queries while an arm is drawn. Failing to install them is not fatal.
@@ -7119,7 +7181,7 @@ bool hookPistonRender(bool enable) {
         for (std::size_t i = 0; i < std::size(kHooks); ++i) {
             if (!kHooks[i].install(installed[i])) return false;
         }
-        OPTIPISTON_INSTALL_LIGHT_FIX();
+        installLightFix();
         OPTIPISTON_INSTALL_LIGHT_PROBE();
         OPTIPISTON_OBSERVE_DO(observe::install();)
         gInstalled.store(true, std::memory_order_release);
@@ -7130,7 +7192,7 @@ bool hookPistonRender(bool enable) {
 
     OPTIPISTON_OBSERVE_DO(observe::remove();)
     OPTIPISTON_REMOVE_LIGHT_PROBE();
-    OPTIPISTON_REMOVE_LIGHT_FIX();
+    removeLightFix();
     for (std::size_t i = std::size(kHooks); i-- > 0;) kHooks[i].remove(installed[i]);
 
     {

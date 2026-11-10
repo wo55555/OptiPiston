@@ -7,13 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-10
+
+> Prerelease for every Minecraft line (26.10, 26.20, 26.30, 26.40, 26.50, 26.60). Install the variant for your line, for example `lip install github.com/wo55555/OptiPiston#client_mc26_50@0.3.0`. The configuration format and C API v1 are unchanged. The fixes have been tested in game on 26.50 only; the other lines build and pass unit tests. 26.60 is new and has not been run in game yet.
+
 ### Added
 
-- Added support for Minecraft 26.60 (LeviLamina 26.60). Diagnostic block-change and moving-block observers are unavailable on this version.
+- Added support for Minecraft 26.60 (LeviLamina 26.60) as the Lip variant `client_mc26_60`. The arm lighting fix stays 26.50 only.
 
 ### Changed
 
 - Widened the singleplayer world-speed range from 0.1x–10x to 0.01x–100x. New installs step through 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 4, 10, 20, 50, and 100.
+
+### Removed
+
+- Removed the diagnostic `/optipiston mark` command. It did nothing in published builds.
 
 ### Fixed
 
@@ -94,7 +102,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Singleplayer world speed with optional audio and particle scaling.
 - `/optipiston` client command and a C API for Playback's replay clock.
 
-[Unreleased]: https://github.com/wo55555/OptiPiston/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/wo55555/OptiPiston/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/wo55555/OptiPiston/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/wo55555/OptiPiston/compare/v0.1.4...v0.2.0
 [0.1.3]: https://github.com/wo55555/OptiPiston/compare/v0.1.2-mc26.20...v0.1.3
 [0.1.2-mc26.20]: https://github.com/wo55555/OptiPiston/compare/v0.1.1-mc26.20...v0.1.2-mc26.20

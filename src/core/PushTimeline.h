@@ -23,11 +23,8 @@ enum class PushDrawer : uint8_t {
 enum class HandoverEnd : uint8_t { None, ActorSeen, Timeout };
 
 inline constexpr uint64_t DefaultHandoverTicks = 4;
-// How long a cell whose visual already ended keeps drawing at its end pose while the real block has not landed.
-// A busy machine lands its blocks well over ten ticks late; the world poll ends the wait early when the cell is empty.
+// How long an ended visual holds its end pose for a late block; the world poll ends it once the cell is empty.
 inline constexpr int64_t DefaultOverrunTicks = 100;
-// Maximum wait before a requested re-mesh hands the cell to the mesh.
-inline constexpr int64_t DefaultLandingTicks = 100;
 
 // One pushed cell. Pure state, so the single-drawer rule can be tested without the game.
 class PushTimeline {
@@ -52,8 +49,7 @@ public:
     void landedActorSeen(uint64_t frame) noexcept;
     // Returns true if the visual ended with the block landed, which requests the re-mesh at `visualTime`.
     [[nodiscard]] bool tick(int64_t tick, double visualTime) noexcept;
-    // The visual ran out. A landed block requests its re-mesh (returns true). An unlanded one keeps the proxy at the
-    // end pose until it lands or DefaultOverrunTicks pass, then goes to the game.
+    // Visual ran out: a landed block asks for its re-mesh (true); an unlanded one holds until it lands or overruns.
     [[nodiscard]] bool visualEnded(double visualTime) noexcept;
     // A newer action picked the block up from this cell.
     void supersededBy(uint64_t newAction) noexcept;
@@ -117,7 +113,6 @@ private:
     int64_t     mTick{};
     int64_t     mDeadline{};
     int64_t     mOverrunDeadline{};
-    int64_t     mLandingDeadline{};
     int64_t     mLandTick{};
     uint64_t    mHandoverTicks{DefaultHandoverTicks};
     double      mRemeshTime{};

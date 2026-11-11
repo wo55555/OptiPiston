@@ -1,13 +1,16 @@
 #pragma once
 
+#include "core/Settings.h"
+
 #include <string>
 #include <vector>
 
 namespace optipiston::configuration {
 
 struct PistonConfig {
-    bool  enabled       = true;
-    float durationTicks = 4.0f;
+    bool            enabled       = true;
+    float           durationTicks = 4.0f;
+    core::TurnStyle turn          = core::TurnStyle::Diagonal;
 };
 
 struct WorldSpeedConfig {

@@ -46,6 +46,16 @@ void setPistonEnabled(CommandOutput& output, bool enabled) {
     output.success("optipiston.command.piston.enabled"_tr(onOff(enabled)));
 }
 
+std::string turnName(core::TurnStyle turn) {
+    return turn == core::TurnStyle::Corner ? "optipiston.command.turn.corner"_tr()
+                                           : "optipiston.command.turn.diagonal"_tr();
+}
+
+void setTurn(CommandOutput& output, core::TurnStyle turn) {
+    OptiPiston::getInstance().updateConfig([turn](auto& config) { config.piston.turn = turn; });
+    output.success("optipiston.command.piston.turn"_tr(turnName(turn)));
+}
+
 } // namespace
 
 void registerCommands(std::string const& name) {
@@ -74,6 +84,14 @@ void registerCommands(std::string const& name) {
             OptiPiston::getInstance().updateConfig([&](auto& config) { config.piston.durationTicks = params.ticks; });
             output.success("optipiston.command.piston.duration"_tr(params.ticks));
         });
+    command.overload()
+        .text("piston")
+        .text("turn")
+        .text("diagonal")
+        .execute([](CommandOrigin const&, CommandOutput& output) { setTurn(output, core::TurnStyle::Diagonal); });
+    command.overload().text("piston").text("turn").text("corner").execute(
+        [](CommandOrigin const&, CommandOutput& output) { setTurn(output, core::TurnStyle::Corner); }
+    );
 
     command.overload<SpeedParams>().text("speed").required("value").execute(
         [](CommandOrigin const&, CommandOutput& output, SpeedParams const& params) {
@@ -101,7 +119,11 @@ void registerCommands(std::string const& name) {
         auto const& world   = core::worldSpeedSettings();
         auto const* blocker = platform::worldSpeedBlocker();
         output.success(
-            "optipiston.command.status.piston"_tr(onOff(piston.enabled.load()), piston.durationTicks.load())
+            "optipiston.command.status.piston"_tr(
+                onOff(piston.enabled.load()),
+                piston.durationTicks.load(),
+                turnName(piston.turn.load())
+            )
         );
         output.success(
             "optipiston.command.status.world"_tr(

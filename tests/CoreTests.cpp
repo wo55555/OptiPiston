@@ -54,6 +54,31 @@ TEST_CASE("fractional durations set the visual length") {
     CHECK_FALSE(segmentRunning(segment, 5));
 }
 
+TEST_CASE("a corner pose finishes the earlier tail before the new push, landing on time") {
+    auto const next = makeSegment(10, 0.0f, 1.0f, 4.0f);
+    auto       pose = cornerPose(next, 0.5f, 10.0);
+    CHECK(pose.tailLeft == doctest::Approx(1.0f));
+    CHECK(pose.value == doctest::Approx(0.0f));
+    pose = cornerPose(next, 0.5f, 11.0);
+    CHECK(pose.tailLeft == doctest::Approx(0.25f));
+    CHECK(pose.value == doctest::Approx(0.0f));
+    pose = cornerPose(next, 0.5f, 12.0);
+    CHECK(pose.tailLeft == doctest::Approx(0.0f));
+    CHECK(pose.value == doctest::Approx(0.25f));
+    pose = cornerPose(next, 0.5f, 14.0);
+    CHECK(pose.tailLeft == doctest::Approx(0.0f));
+    CHECK(pose.value == doctest::Approx(1.0f));
+}
+
+TEST_CASE("a corner pose with no tail left is the plain segment") {
+    auto const next = makeSegment(0, 1.0f, 0.0f, 2.0f);
+    for (double t : {0.0, 0.5, 1.0, 1.5, 2.0, 3.0}) {
+        auto const pose = cornerPose(next, 0.0f, t);
+        CHECK(pose.tailLeft == doctest::Approx(0.0f));
+        CHECK(pose.value == doctest::Approx(segmentValue(next, t)));
+    }
+}
+
 TEST_CASE("visual time lags the tick by one") {
     CHECK(visualTime(10, 0.0f) == doctest::Approx(9.0));
     CHECK(visualTime(10, 0.5f) == doctest::Approx(9.5));

@@ -70,18 +70,20 @@ Download `OptiPiston-mc<line>-windows-x64.zip` for your line (for example `OptiP
 
 ## Commands
 
-| Command                               | Description                                                    |
-| ------------------------------------- | -------------------------------------------------------------- |
-| `/optipiston status`                  | Show piston animation state and requested/applied world speed. |
-| `/optipiston piston on`               | Turn piston animation on.                                      |
-| `/optipiston piston off`              | Turn piston animation off.                                     |
-| `/optipiston piston duration <ticks>` | Set the animation length, from `2` to `4` game ticks.          |
-| `/optipiston speed <value>`           | Set world speed, from `0.01` to `100`.                         |
-| `/optipiston speed next`              | Switch to the next world speed preset.                         |
-| `/optipiston speed prev`              | Switch to the previous world speed preset.                     |
-| `/optipiston speed reset`             | Return to normal speed (`1x`).                                 |
+| Command                               | Description                                                        |
+| ------------------------------------- | ------------------------------------------------------------------ |
+| `/optipiston status`                  | Show piston animation state and requested/applied world speed.     |
+| `/optipiston piston on`               | Turn piston animation on.                                          |
+| `/optipiston piston off`              | Turn piston animation off.                                         |
+| `/optipiston piston duration <ticks>` | Set the animation length, from `2` to `4` game ticks.              |
+| `/optipiston piston turn diagonal`    | A block pushed again mid-push moves diagonally (default).          |
+| `/optipiston piston turn corner`      | A block pushed again mid-push finishes its first push, then turns. |
+| `/optipiston speed <value>`           | Set world speed, from `0.01` to `100`.                             |
+| `/optipiston speed next`              | Switch to the next world speed preset.                             |
+| `/optipiston speed prev`              | Switch to the previous world speed preset.                         |
+| `/optipiston speed reset`             | Return to normal speed (`1x`).                                     |
 
-Piston settings are saved to the configuration file. World speed applies only in a local world with no other players connected and while no other mod drives the clock; `/optipiston status` shows the reason when it is not applied.
+Piston settings are saved to the configuration file. With `Corner`, a block that another piston pushes before its first push has finished speeds up to finish that push, then turns at a right angle; it still lands at the same time. Pushes along the same axis always play as before. World speed applies only in a local world with no other players connected and while no other mod drives the clock; `/optipiston status` shows the reason when it is not applied.
 
 ## Configuration
 
@@ -93,7 +95,8 @@ The configuration lives at `mods/OptiPiston/config/config.json` and is kept acro
     "locateName": "zh_CN",
     "piston": {
         "enabled": true,
-        "durationTicks": 4.0
+        "durationTicks": 4.0,
+        "turn": "Diagonal"
     },
     "worldSpeed": {
         "presets": [0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 4.0, 10.0, 20.0, 50.0, 100.0],
@@ -107,14 +110,15 @@ The configuration lives at `mods/OptiPiston/config/config.json` and is kept acro
 }
 ```
 
-| Key                    | Description                                      |
-| ---------------------- | ------------------------------------------------ |
-| `piston.enabled`       | Turn piston animation on or off.                 |
-| `piston.durationTicks` | Animation length in game ticks, from `2` to `4`. |
-| `worldSpeed.presets`   | Speeds cycled by `speed next` / `speed prev`.    |
-| `worldSpeed.audio`     | Scale sound playback with world speed.           |
-| `worldSpeed.particles` | Scale particles with world speed.                |
-| `command.command`      | Name of the client command.                      |
+| Key                    | Description                                                    |
+| ---------------------- | -------------------------------------------------------------- |
+| `piston.enabled`       | Turn piston animation on or off.                               |
+| `piston.durationTicks` | Animation length in game ticks, from `2` to `4`.               |
+| `piston.turn`          | Path of a block pushed again mid-push: `Diagonal` or `Corner`. |
+| `worldSpeed.presets`   | Speeds cycled by `speed next` / `speed prev`.                  |
+| `worldSpeed.audio`     | Scale sound playback with world speed.                         |
+| `worldSpeed.particles` | Scale particles with world speed.                              |
+| `command.command`      | Name of the client command.                                    |
 
 ## For Mod Developers
 

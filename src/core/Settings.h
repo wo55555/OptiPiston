@@ -1,14 +1,22 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <vector>
 
 namespace optipiston::core {
 
+// Path of a block pushed again before its earlier push finished.
+enum class TurnStyle : uint8_t {
+    Diagonal, // both pushes play at once
+    Corner    // the earlier push finishes first, then the block turns
+};
+
 // Values the render and tick hooks read; written by commands and the external API.
 struct PistonSettings {
-    std::atomic_bool   enabled{true};
-    std::atomic<float> durationTicks{4.0f};
+    std::atomic_bool       enabled{true};
+    std::atomic<float>     durationTicks{4.0f};
+    std::atomic<TurnStyle> turn{TurnStyle::Diagonal};
 };
 
 [[nodiscard]] PistonSettings& pistonSettings() noexcept;

@@ -66,6 +66,7 @@ void OptiPiston::applyConfig() {
     auto&       piston = core::pistonSettings();
     piston.enabled.store(config.piston.enabled);
     piston.durationTicks.store(config.piston.durationTicks);
+    piston.turn.store(config.piston.turn);
     auto& world = core::worldSpeedSettings();
     world.audio.store(config.worldSpeed.audio);
     world.particles.store(config.worldSpeed.particles);

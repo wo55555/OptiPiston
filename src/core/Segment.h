@@ -29,4 +29,13 @@ struct Segment {
 // Segment for a piston action started at `tick` with the current settings.
 [[nodiscard]] Segment makeSegment(int64_t tick, float from, float to, float durationTicks) noexcept;
 
+// tailLeft: share of the earlier push's remaining distance still to cover; value: the new segment's value.
+struct CornerPose {
+    float tailLeft{};
+    float value{};
+};
+
+// A block pushed again with `tail` blocks of its earlier push left covers that first, then turns, landing on time.
+[[nodiscard]] CornerPose cornerPose(Segment const& next, float tail, double time) noexcept;
+
 } // namespace optipiston::core

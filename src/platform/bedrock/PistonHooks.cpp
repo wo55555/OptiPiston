@@ -350,6 +350,7 @@ struct PushCell {
     ::BlockPos                         pistonPos;
     ActionVisual                       visual; // copied, so a successor can still replay its tail after the action ends
     std::optional<CarryVisual>         carry;
+    bool                               corner{}; // the carried tail finishes before the block turns
     core::PushTimeline                 timeline;
     std::shared_ptr<std::string const> wrapped; // block name, shared with the published views
     std::shared_ptr<::MovingBlockActor> proxy;
@@ -4052,6 +4053,20 @@ float armValue(PistonVisual const& visual, double time) {
 ::Vec3 cellOffset(PushCell const& rec, double time) {
     auto const state = rec.timeline.state();
     if (state != PushState::Animating && state != PushState::Landing) return ::Vec3{0.0f, 0.0f, 0.0f};
+    auto const& next = rec.visual.segment;
+    if (rec.carry && rec.corner && time > static_cast<double>(next.startTick)) {
+        auto const start  = static_cast<double>(next.startTick);
+        auto const tail   = actionOffset(rec.carry->visual, start);
+        auto const left   = std::abs(segmentValue(rec.carry->visual.segment, start) - rec.carry->visual.segment.to);
+        auto const pose   = core::cornerPose(next, left, time);
+        auto const rel    = pose.value - next.to;
+        auto const facing = rec.visual.facing;
+        return ::Vec3{
+            static_cast<float>(facing.x) * rel + tail.x * pose.tailLeft,
+            static_cast<float>(facing.y) * rel + tail.y * pose.tailLeft,
+            static_cast<float>(facing.z) * rel + tail.z * pose.tailLeft
+        };
+    }
     auto offset = actionOffset(rec.visual, time);
     if (rec.carry) {
         auto const tail  = actionOffset(rec.carry->visual, time);
@@ -5010,6 +5025,12 @@ void commitProxyLocked(NewProxy& made, Graveyard& drop) {
             OPTIPISTON_PROBE_DO(probeTailCarried(made.cell, source, tail->second.carry.action, made.action);)
             gReplacedTails.erase(tail);
         }
+    }
+    if (rec.carry) {
+        auto const& was = rec.carry->visual.facing;
+        auto const& now = made.visual.facing;
+        rec.corner      = core::pistonSettings().turn.load(std::memory_order_relaxed) == core::TurnStyle::Corner
+                  && was.x * now.x + was.y * now.y + was.z * now.z == 0;
     }
     if (source != made.pistonPos && rec.wrapped) moveArmLocked(source, made.cell, *rec.wrapped);
     if (auto const replaced = gCells.find(made.cell); replaced != gCells.end()) {

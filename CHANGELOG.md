@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A `piston.turn` option and `/optipiston piston turn diagonal|corner` command for a block that another piston pushes before its first push has finished. `Diagonal` (default) plays both pushes at once, so the block cuts the corner. `Corner` speeds the block up to finish its first push, then turns at a right angle; it lands at the same time either way.
+
 ## [0.3.1] - 2026-11-11
 
 > Prerelease for every Minecraft line (26.10, 26.20, 26.30, 26.40, 26.50, 26.60). Install the variant for your line, for example `lip install github.com/wo55555/OptiPiston#client_mc26_50@0.3.1`. The configuration format and C API v1 are unchanged. The piston-wall fix has been tested in game on 26.50 only; the other lines build and pass unit tests.

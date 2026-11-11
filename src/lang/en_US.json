@@ -7,7 +7,12 @@
             "piston": {
                 "enabled": "Piston animation: {}",
                 "duration": "Piston animation duration: {}gt",
-                "durationRange": "Duration must be between {} and {} ticks"
+                "durationRange": "Duration must be between {} and {} ticks",
+                "turn": "Blocks pushed again mid-push: {}"
+            },
+            "turn": {
+                "diagonal": "move diagonally",
+                "corner": "finish, then turn at a right angle"
             },
             "speed": {
                 "set": "Requested world speed: {}x",
@@ -15,7 +20,7 @@
                 "blocked": "Not applied: {}"
             },
             "status": {
-                "piston": "Piston animation {}, duration {}gt",
+                "piston": "Piston animation {}, duration {}gt, blocks pushed again mid-push {}",
                 "world": "World speed requested {}x, applied {}x ({})",
                 "active": "active"
             }

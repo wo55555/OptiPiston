@@ -30,6 +30,7 @@
 #include "mc/client/network/ClientNetworkHandler.h"
 #include "mc/client/network/LegacyClientNetworkHandler.h"
 #include "mc/client/player/LocalPlayer.h"
+#include "mc/client/renderer/ActorShaderManager.h"
 #include "mc/client/renderer/BaseActorRenderContext.h"
 #include "mc/client/renderer/block/BlockOccluder.h"
 #include "mc/client/renderer/block/BlockTessellator.h"
@@ -46,6 +47,8 @@
 #include "mc/client/renderer/game/LevelRenderer.h"
 #include "mc/client/renderer/game/LevelRendererCamera.h"
 #include "mc/client/renderer/game/LevelRendererPlayer.h"
+#include "mc/client/renderer/ptexture/LightTexture.h"
+#include "mc/deps/core/math/Color.h"
 #include "mc/deps/core/math/Vec3.h"
 #include "mc/deps/core/renderer/RenderMaterialInfo.h"
 #include "mc/deps/minecraft_renderer/framebuilder/dragon/RenderMetadata.h"
@@ -76,7 +79,6 @@
 #include "mc/world/phys/AABB.h"
 
 #if OPTIPISTON_MC == 2610
-#include "mc/client/renderer/ActorShaderManager.h"
 #include "mc/client/renderer/chunks/RenderChunkBuilder.h"
 #include "mc/world/level/block/PistonBlock.h"
 #include "mc/world/level/block/VanillaStates.h"
@@ -271,11 +273,13 @@ thread_local int tRenderDepth = 0;
 // The proxy being dispatched by drawProxies on this thread.
 thread_local ::BlockActor const* tProxyDraw = nullptr;
 
-// Set around one proxy dispatch: the cell the proxy stands in and where the last lit answer for that cell is kept.
+// Set around one proxy dispatch: the cell the proxy stands in, where the last lit answer for that cell is kept, and
+// the camera that sees it.
 struct ProxyLightFix {
     bool                   active{};
     ::BlockPos             cell{};
     std::atomic<uint16_t>* memory{};
+    ::Vec3                 camera{};
 };
 thread_local ProxyLightFix tProxyLightFix;
 
@@ -5485,7 +5489,7 @@ void noteCameraDispatch(::BlockActor const& actor, ::mce::MaterialPtr const& for
 }
 
 // Draws the proxies whose timeline says they are the drawer. Runs right after the camera drew its queues.
-void drawProxies(::BaseActorRenderContext& context, bool renderAlphaLayer) {
+void drawProxies(::BaseActorRenderContext& context, bool renderAlphaLayer, ::Vec3 const& camera) {
     OPTIPISTON_PERF_SCOPE(perf, RenderBlockEntities);
     if (!gStateWatch.load(std::memory_order_relaxed)) return;
     // A reused buffer of cells from the view, which the pin keeps alive for the whole draw.
@@ -5531,7 +5535,7 @@ void drawProxies(::BaseActorRenderContext& context, bool renderAlphaLayer) {
             })
         }
         tProxyDraw = proxy.get();
-        tProxyLightFix = {true, proxy->mPosition.get(), &rec->shared->lightMemory};
+        tProxyLightFix = {true, proxy->mPosition.get(), &rec->shared->lightMemory, camera};
         OPTIPISTON_PROBE_DO(
             tProbePass = alphaLayer ? 1 : 0; probeProxyDispatched(proxy->mPosition.get(), tProbePass);
             if (alphaLayer) probeAlphaEarly(proxy->mPosition.get());
@@ -6371,7 +6375,7 @@ LL_TYPE_INSTANCE_HOOK(
     RenderViewScope scope;
     origin(renderContext, renderAlphaLayer);
     if (smoothPistonRenderEnabled() && gStateWatch.load(std::memory_order_relaxed) && animationActive())
-        drawProxies(renderContext, renderAlphaLayer);
+        drawProxies(renderContext, renderAlphaLayer, mCameraPos.get());
 }
 
 // Nonzero while a BlockActorDataPacket is being handled; the client may re-apply held data later outside it.
@@ -6741,7 +6745,43 @@ LL_TYPE_INSTANCE_HOOK(
     return result;
 }
 
-#if OPTIPISTON_MC == 2610
+// The landed block lights each face from the cell in front of it, while a moving block's shader takes one light for
+// the whole block; that light becomes the faces the camera sees, weighted by how squarely it sees them.
+void fixTileLightIntensity(::ScreenContext& screenContext, ::BlockSource& source) {
+    static constexpr int kFaces[6][3]{
+        {0,  -1, 0 },
+        {0,  1,  0 },
+        {0,  0,  -1},
+        {0,  0,  1 },
+        {-1, 0,  0 },
+        {1,  0,  0 }
+    };
+    auto const& fix    = tProxyLightFix;
+    float       weight = 0, block = 0, sky = 0;
+    for (auto const& n : kFaces) {
+        float const w = (fix.camera.x - fix.cell.x - 0.5f) * n[0] + (fix.camera.y - fix.cell.y - 0.5f) * n[1]
+                      + (fix.camera.z - fix.cell.z - 0.5f) * n[2];
+        if (w <= 0) continue;
+        ::BlockPos const front{fix.cell.x + n[0], fix.cell.y + n[1], fix.cell.z + n[2]};
+        auto const       light = (source.*reinterpret_cast<LightColorFn>(&::BlockSource::getLightColor))(front, 0).v;
+        // An opaque cell stores 0/0 and hides that face.
+        if (light == 0) continue;
+        weight += w;
+        block  += w * static_cast<float>(light >> 8);
+        sky    += w * static_cast<float>(light & 0xFF);
+    }
+    if (weight == 0) return;
+    // MeshContext::constantBuffers at +32, its entityConstantBuffer.TILE_LIGHT_INTENSITY at +224; that constant keeps
+    // its value pointer at +64 and its dirty flag at +49.
+    auto* const buffers  = *reinterpret_cast<std::byte* const*>(reinterpret_cast<std::byte*>(&screenContext) + 32);
+    auto* const constant = *reinterpret_cast<std::byte**>(buffers + 224);
+    auto* const value    = *reinterpret_cast<float**>(constant + 64);
+    // Level/15, as the chunk shader reads it.
+    value[0]     = block / (weight * 15.0f);
+    value[1]     = sky / (weight * 15.0f);
+    constant[49] = std::byte{1};
+}
+
 using ShaderLightFn = void (*)(
     ::ScreenContext&,
     ::BlockSource&,
@@ -6765,7 +6805,7 @@ using ShaderLightHookFn = void (*)(
     ::Vec4 const&
 );
 
-// This line hands a block actor's light straight to its shader, so both fixes are applied to that value instead.
+// A block actor's light on its way to the shader: 26.10 applies the arm fixes to it, and every line relights a proxy.
 LL_TYPE_STATIC_HOOK(
     OptiPistonShaderLightHook,
     ll::memory::HookPriority::Normal,
@@ -6782,8 +6822,9 @@ LL_TYPE_STATIC_HOOK(
     ::Vec2 const&      uvScale,
     ::Vec4 const&      uvAnim
 ) {
-    LightRet    light = lightColorUV;
-    auto const& fix   = tArmLightFix;
+    LightRet light = lightColorUV;
+#if OPTIPISTON_MC == 2610
+    auto const& fix = tArmLightFix;
     if (fix.active) {
         if (light.v == 0)
             light = (source.*reinterpret_cast<LightColorFn>(&::BlockSource::getLightColor))(fix.piston, 0);
@@ -6802,24 +6843,96 @@ LL_TYPE_STATIC_HOOK(
             )
         }
     }
+#endif
     origin(screenContext, source, light, blockLightColor, a, ignoreLighting, lightTexture, uvScale, uvAnim);
+    if (tProxyLightFix.active && !ignoreLighting) fixTileLightIntensity(screenContext, source);
 }
+
+using ll::memory_literals::operator""_sig;
+
+#if OPTIPISTON_MC == 2610
+constexpr std::array kColorForUVSigs{
+    "48 8B C4 48 81 EC D8 00 00 00 4C 8B 19 4C 8B D2 4C 8B C9 49 83 7B 28 00 0F 84 ?? ?? ?? ?? 4D 8B "
+    "5B 20 4D 85 DB 0F 84 ?? ?? ?? ?? F3 0F 10 05 ?? ?? ?? ?? 0F 57 C9 F3 0F 10 15 ?? ?? ?? ?? 0F 29 "
+    "70 E8 0F 29 78 D8 F3 41 0F 10 38 F3 0F 59 3D"_sig
+};
+#elif OPTIPISTON_MC == 2620
+constexpr std::array kColorForUVSigs{
+    "41 56 56 57 53 48 81 EC D8 00 00 00 44 0F 29 BC 24 C0 00 00 00 44 0F 29 B4 24 B0 00 00 00 44 0F "
+    "29 AC 24 A0 00 00 00 44 0F 29 A4 24 90 00 00 00 44 0F 29 9C 24 80 00 00 00 44 0F 29 54 24 70 44 "
+    "0F 29 4C 24 60 44 0F 29 44 24 50 0F 29 7C 24 40 0F 29 74 24 30 4C 89 C3 48 89 D6 49 89 CE 48 8B "
+    "09 E8 ?? ?? ?? ?? 84 C0 0F 85 ?? ?? ?? ?? 49 8B 0E 48 83 C1 18 E8 ?? ?? ?? ?? 48 85 C0 0F 84 ?? "
+    "?? ?? ?? 48 89 C7 F3 0F 10 05 ?? ?? ?? ?? F3 0F 10 0B F3 0F 59 C8"_sig
+};
+#elif OPTIPISTON_MC == 2632
+// No 26.30 game build was at hand to match against, so both neighbouring layouts are tried.
+constexpr std::array kColorForUVSigs{
+    "41 56 56 57 53 48 81 EC D8 00 00 00 44 0F 29 BC 24 C0 00 00 00 44 0F 29 B4 24 B0 00 00 00 44 0F "
+    "29 AC 24 A0 00 00 00 44 0F 29 A4 24 90 00 00 00 44 0F 29 9C 24 80 00 00 00 44 0F 29 54 24 70 44 "
+    "0F 29 4C 24 60 44 0F 29 44 24 50 0F 29 7C 24 40 0F 29 74 24 30 4C 89 C3 48 89 D6 49 89 CE 48 8B "
+    "09 E8 ?? ?? ?? ?? 84 C0 0F 85 ?? ?? ?? ?? 49 8B 0E 48 83 C1 18 E8 ?? ?? ?? ?? 48 85 C0 0F 84 ?? "
+    "?? ?? ?? 48 89 C7 F3 0F 10 05 ?? ?? ?? ?? F3 0F 10 0B F3 0F 59 C8"_sig,
+    "56 53 48 81 EC F8 00 00 00 44 0F 29 BC 24 E0 00 00 00 44 0F 29 B4 24 D0 00 00 00 44 0F 29 AC 24 "
+    "C0 00 00 00 44 0F 29 A4 24 B0 00 00 00 44 0F 29 9C 24 A0 00 00 00 44 0F 29 94 24 90 00 00 00 44 "
+    "0F 29 8C 24 80 00 00 00 44 0F 29 44 24 70 0F 29 7C 24 60 0F 29 74 24 50 48 89 D0 48 8B 11 48 83 "
+    "7A 28 00 0F 84 ?? ?? ?? ?? 48 8B 52 20 48 85 D2 0F 84 ?? ?? ?? ?? F3 0F 10 05 ?? ?? ?? ?? F3 41 "
+    "0F 10 08 F3 0F 59 C8"_sig
+};
+#elif OPTIPISTON_MC == 2660
+constexpr std::array kColorForUVSigs{
+    "48 81 EC E8 00 00 00 44 0F 29 BC 24 D0 00 00 00 44 0F 29 B4 24 C0 00 00 00 44 0F 29 AC 24 B0 00 "
+    "00 00 44 0F 29 A4 24 A0 00 00 00 44 0F 29 9C 24 90 00 00 00 44 0F 29 94 24 80 00 00 00 44 0F 29 "
+    "4C 24 70 44 0F 29 44 24 60 0F 29 7C 24 50 0F 29 74 24 40 48 89 D0 48 8B 11 48 83 7A 28 00 0F 84 "
+    "?? ?? ?? ?? 48 8B 52 20 48 85 D2 0F 84 ?? ?? ?? ?? F3 0F 10 15 ?? ?? ?? ?? F3 41 0F 10 18 F3 0F "
+    "59 DA"_sig
+};
+#else
+constexpr std::array kColorForUVSigs{
+    "56 53 48 81 EC F8 00 00 00 44 0F 29 BC 24 E0 00 00 00 44 0F 29 B4 24 D0 00 00 00 44 0F 29 AC 24 "
+    "C0 00 00 00 44 0F 29 A4 24 B0 00 00 00 44 0F 29 9C 24 A0 00 00 00 44 0F 29 94 24 90 00 00 00 44 "
+    "0F 29 8C 24 80 00 00 00 44 0F 29 44 24 70 0F 29 7C 24 60 0F 29 74 24 50 48 89 D0 48 8B 11 48 83 "
+    "7A 28 00 0F 84 ?? ?? ?? ?? 48 8B 52 20 48 85 D2 0F 84 ?? ?? ?? ?? F3 0F 10 05 ?? ?? ?? ?? F3 41 "
+    "0F 10 08 F3 0F 59 C8"_sig
+};
 #endif
 
-bool gLightFixInstalled[2]{};
+std::uintptr_t colorForUVTarget() {
+    static std::uintptr_t const target = [] {
+        for (auto const& sig : kColorForUVSigs)
+            if (auto* const fn = sig.resolve(true)) return reinterpret_cast<std::uintptr_t>(fn);
+        return std::uintptr_t{};
+    }();
+    return target;
+}
+
+// The chunk shader samples the light map at level/15; a moving block's colour is looked up here at level/16.
+LL_TYPE_INSTANCE_HOOK(
+    OptiPistonLightUVHook,
+    ll::memory::HookPriority::Normal,
+    ::LightTexture,
+    colorForUVTarget(),
+    ::mce::Color,
+    ::glm::vec2 const& uv
+) {
+    if (!tProxyLightFix.active) return origin(uv);
+    // Just short of the last texel: the lookup snaps anything at or past it back by one texel.
+    constexpr float kTopTexel = 0.96874f;
+    auto const      scaled    = uv * (16.0f / 15.0f);
+    return origin(::glm::vec2{std::min(scaled.x, kTopTexel), std::min(scaled.y, kTopTexel)});
+}
+
+bool gLightFixInstalled[3]{};
 
 // Not fatal when a hook is missing: the arm then keeps the game's own light.
 void installLightFix() {
     (void)installHook<OptiPistonLightColorHook>(gLightFixInstalled[0]);
-#if OPTIPISTON_MC == 2610
+    if (colorForUVTarget() != 0) (void)installHook<OptiPistonLightUVHook>(gLightFixInstalled[2]);
     (void)installHook<OptiPistonShaderLightHook>(gLightFixInstalled[1]);
-#endif
 }
 
 void removeLightFix() {
-#if OPTIPISTON_MC == 2610
     removeHook<OptiPistonShaderLightHook>(gLightFixInstalled[1]);
-#endif
+    removeHook<OptiPistonLightUVHook>(gLightFixInstalled[2]);
     removeHook<OptiPistonLightColorHook>(gLightFixInstalled[0]);
 }
 

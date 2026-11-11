@@ -61,9 +61,7 @@ bool PushTimeline::tick(int64_t tick, double visualTime) noexcept {
 bool PushTimeline::visualEnded(double visualTime) noexcept {
     if (mState != PushState::Animating) return false;
     if (!mLanded) {
-        // The real block is not there yet, so the game would draw an empty cell or the vanilla moving block.
-        // Hold the end pose; blockLanded() then goes through the normal re-mesh on the next tick.
-        // A clock that jumped back (segmentExpired is also true then) must not hold the cell for ages.
+        // The real block has not landed: hold the end pose until the overrun deadline or a backward clock jump.
         if (mTick >= mOverrunDeadline || mTick < mSegment.startTick) finish(false, HandoverEnd::None);
         return false;
     }

@@ -1,5 +1,4 @@
-// Temporary diagnostics: counts the drawers of every pushed cell per frame and logs violations of the
-// single-drawer rule to mods/OptiPiston/probe.log.
+// Probe builds log render diagnostics to mods/OptiPiston/probe.log; published builds set OPTIPISTON_PROBE=0.
 #ifndef OPTIPISTON_PROBE
 #define OPTIPISTON_PROBE 1
 #endif
@@ -15,7 +14,6 @@
 #endif
 
 #include "platform/Features.h"
-#include "platform/bedrock/Observe.h"
 
 #include "core/Clock.h"
 #include "core/Limits.h"
@@ -89,9 +87,6 @@
 #if OPTIPISTON_MC >= 2632
 #include "mc/world/level/block/actor/VanillaBlockActor.h"
 #include "mc/world/level/block/actor/component/IVanillaRenderBlockActorComponent.h"
-#if OPTIPISTON_PROBE
-#include "mc/world/level/block/BrightnessPair.h"
-#endif
 #endif
 
 #include <algorithm>
@@ -239,16 +234,10 @@ using QueuedItem = ::BlockActor;
 QueuedItem* queuedItemOf(::BlockActor* actor) { return actor; }
 #endif
 
-// Replay rebuilds PistonBlockActors without retiring the old ones, leaving several on one cell that the engine draws a
-// head for each. Animating ones advance mProgress in $tick; leftovers never do, so stepping distinguishes the two.
-// Maps each stepped piston to the level tick it last ticked on, so pruning can drop destroyed ones.
+// Replay leaves stale pistons on a cell and only animating ones step in $tick; maps each to its last stepped tick.
 std::unordered_map<::BlockActor const*, int64_t> gSteppedPistons;
 
-// HeadOwner::round is one rendered frame (gFrame). A destroyed piston's address cannot be detected, and a
-// claim that outlived its owner locked the cell, leaving frames with no head. gFrame stays put for every pass
-// of one rendered frame and advances only after that frame, so a claim from an earlier frame of the same game
-// tick cannot suppress the only head submitted now.
-
+// HeadOwner::round is one rendered frame (gFrame), so a claim from an earlier frame cannot hide the only head now.
 struct HeadOwner {
     uint64_t            round{};
     ::BlockActor const* actor{};
@@ -260,8 +249,7 @@ struct HeadOwner {
 // Leaf lock over gSteppedPistons; only contested cells and the piston tick take it.
 std::mutex gHeadMutex;
 
-// A cell's heads are all drawn by one thread within one pass, so each drawing thread elects in its own table and
-// the per-arm path takes no lock. Tables stay registered until the module goes away, never freed under a thread.
+// Each drawing thread elects heads in its own table, so the arm path takes no lock; tables live until unload.
 struct HeadTable {
     uint64_t                                                epoch{};
     uint64_t                                                round{};
@@ -316,8 +304,7 @@ struct ActionVisual {
     ::BlockPos    facing;
 };
 
-// Levels ticks a finished cell keeps hiding the game's own instance, and levels ticks after a start in which the
-// target cells are searched for the game's instances.
+// Level ticks a finished cell keeps hiding the game's instance, and a new action searches its target cells.
 constexpr int64_t kTombstoneTicks = 10;
 constexpr int64_t kScanTicks      = 3;
 
@@ -330,8 +317,7 @@ struct PistonVisual {
     std::optional<ActionVisual> bodyCarry;
     // The body was pushed away while the arm still played; the arm went along and this entry no longer answers here.
     bool vacated{};
-    // Last tick on which target cells are searched, and a copy of the piston's attached blocks taken on its own
-    // thread, so the render thread never reads the live vector.
+    // Last tick to search target cells, and the attached blocks copied on the piston's own thread for the renderer.
     int64_t scanUntil{};
     // Replaced whole, never edited, so a published view shares it.
     std::shared_ptr<std::vector<::BlockPos> const> attached;
@@ -385,9 +371,7 @@ using Graveyard = std::vector<std::shared_ptr<void const>>;
 using CellMap   = std::unordered_map<::BlockPos, PushCell, BlockPosHash>;
 using PistonMap = std::unordered_map<::BlockPos, PistonVisual, BlockPosHash>;
 
-// A cell that a newer action replaced while its push was still playing, before the sibling cell of that action
-// which picks the block up from there was committed. The sibling takes the tail over, so the commit order of the
-// cells of one action does not matter.
+// A cell replaced mid-push before its action's sibling cell committed; the sibling takes the tail over.
 struct ReplacedTail {
     uint64_t    action{}; // the newer action
     CarryVisual carry;
@@ -557,8 +541,7 @@ private:
     uint64_t mStart;
 };
 
-// Set at load when a file named perf-only sits in the mod folder: the bookkeeping probes that cost real time stay off,
-// so the timings come close to a build without probes.
+// A perf-only file in the mod folder turns off the costly bookkeeping probes, so timings stay close to release.
 std::atomic_bool gProbePerfOnly{false};
 
 // Counts behind the per-call costs, summed per window and reset when printed.
@@ -733,8 +716,7 @@ std::unordered_map<::RenderChunkGeometry const*, std::vector<::BlockPos>> gStale
 std::unordered_map<::RenderChunkGeometry const*, std::vector<::BlockPos>> gHeldMesh;
 // Cells whose awaiting state was just published; builds in flight at that moment may not have seen it.
 std::vector<::BlockPos> gAwaitPublished;
-// Builds between start and commit, with the origin of their chunk; and the cells created while one was running.
-// Leaf lock: taken under gAnimMutex, never the other way round.
+// Builds between start and commit with their chunk origin, and cells created meanwhile; leaf lock under gAnimMutex.
 std::mutex                                                                gFlightMutex;
 std::unordered_map<::RenderChunkGeometry const*, ::BlockPos>              gBuildsInFlight;
 std::unordered_map<::RenderChunkGeometry const*, std::vector<::BlockPos>> gStaleRisk;
@@ -757,8 +739,7 @@ constexpr bool     kCommitShows     = false;
 #else
 constexpr bool kCommitShows = true;
 #endif
-// Landed cells are re-meshed just before their motion ends, so the proxy does not have to cover the re-mesh. All in
-// visual ticks. Written by the render and frame threads without gAnimMutex, hence atomic.
+// Landed cells re-mesh just before their motion ends; in visual ticks, written without gAnimMutex, hence atomic.
 std::atomic<double>                   gLastVisualTime{0.0};
 std::chrono::steady_clock::time_point gPrevFrameWall{}; // frame thread only
 std::atomic<double>                   gFrameStep{0.15}; // visual ticks per frame
@@ -804,8 +785,7 @@ class MeshBuildScope;
 // The chunk build running on this thread.
 thread_local MeshBuildScope* tBuild = nullptr;
 
-// Wraps one chunk build: the mesh view is cached for the build and re-read only after a publication, and cells
-// released to the mesher are reported once at the end instead of under a lock per block.
+// One chunk build: caches the mesh view and reports released cells once at the end instead of locking per block.
 class MeshBuildScope {
 public:
     explicit MeshBuildScope(::RenderChunkGeometry const* geometry) : mGeometry(geometry), mSaved(tBuild) {
@@ -910,8 +890,7 @@ class RenderViewScope;
 // The render pass running on this thread.
 thread_local RenderViewScope* tRenderScope = nullptr;
 
-// Wraps one block-entity render pass: everything drawn inside answers from one cached view, refreshed only when the
-// revision moves. Views it replaced stay alive to the end, since callers may still hold references into them.
+// One block-entity render pass answers from one cached view; replaced views stay alive as callers may hold them.
 class RenderViewScope {
 public:
     RenderViewScope() : mSaved(tRenderScope) { tRenderScope = this; }
@@ -923,9 +902,7 @@ public:
         if (!mView || mView->revision != gRevision.load(std::memory_order_acquire)) refresh();
         return *mView;
     }
-    // Like get(), but accepts a view that lacks only cells this thread pure-inserted since the last refresh (none
-    // replaced or superseded). Lets a burst of first-time game MovingBlocks be handled without rebuilding the view
-    // after each one.
+    // Like get(), but tolerates cells this thread only inserted since the refresh, so a burst needs no rebuild.
     RenderView const& lagged() {
         auto const revision = gRevision.load(std::memory_order_acquire);
         if (!mView || (mView->revision != revision && !(mLagging && mLagRevision == revision))) refresh();
@@ -995,8 +972,7 @@ void bumpLocked() {
     OPTIPISTON_PROBE_DO(gPerfCounts.bumps.fetch_add(1, std::memory_order_relaxed);)
 }
 
-// Brings the census and the mesh view in step with the cell's timeline. `touch` says that other data the render view
-// copies changed too.
+// Brings the census and mesh view in step with the cell's timeline; `touch` marks other render-view data changed.
 void syncCellLocked(::BlockPos const& pos, PushCell& rec, bool touch) {
     auto const traits = core::pushTraits(rec.timeline);
     auto const state  = rec.timeline.state();
@@ -1327,8 +1303,7 @@ struct ProbeArmCell {
     int64_t  lastDoubleFrame{-1000};
 };
 
-// Per game MovingBlock instance that was drawn while its cell no longer showed a matching block; frames are real
-// frames.
+// Per game MovingBlock drawn while its cell no longer showed a matching block; frames are real frames.
 struct ProbeGhost {
     uint64_t firstFrame{};
     uint64_t lastSeenFrame{};
@@ -1789,9 +1764,7 @@ void probeVanillaDraw(::BlockPos const& cell) {
     tally.whyState  = tProbeWhy.state;
 }
 
-// The game's instance is about to be drawn. Suspicious when it is detached, or its cell shows neither a
-// moving_block nor the block it wraps (air after the real block was broken). Takes gProbeMutex twice, never
-// while reading the render view.
+// About to draw the game's instance: suspicious when detached, or its cell shows neither moving_block nor its block.
 void probeGhost(
     ::MovingBlockActor const&          moving,
     ::Block const&                     cellBlock,
@@ -1976,8 +1949,7 @@ void probeTailCarried(::BlockPos const& cell, ::BlockPos const& source, uint64_t
     );
 }
 
-// Called under gAnimMutex (then gProbeMutex). remain > 0: the mesh goes live while the proxy still has that many
-// visual ticks to move, so the block shows in its final cell early. Only the first 300 are logged.
+// Under gAnimMutex then gProbeMutex. remain > 0: the mesh goes live before the proxy arrives. Logs the first 300.
 void probeMeshCommit(::BlockPos const& cell, PushCell const& rec, double step, double latencyFrames) {
     auto const                   speed   = core::worldSpeedSettings().applied.load(std::memory_order_relaxed);
     auto const&                  segment = rec.visual.segment;
@@ -2109,8 +2081,7 @@ void probeEmptyTess(::BlockPos const& pos) {
     );
 }
 
-// Caller holds gAnimMutex. An awaiting cell was handed to a build that never visited it, or held by one that drew it
-// empty beside an animating neighbour.
+// Caller holds gAnimMutex. A build handed an awaiting cell over (accepted) or held it beside a moving neighbour.
 void probeEmptyAsk(::BlockPos const& pos, uint64_t action, bool accepted) {
     static std::atomic<uint64_t> lines{0};
     if (gProbePerfOnly.load(std::memory_order_relaxed) || lines.fetch_add(1, std::memory_order_relaxed) >= 200) return;
@@ -2262,118 +2233,10 @@ void probeArmLightSample(
     );
 }
 
-// What the game itself asks the light for while an arm is drawn: every BlockSource light query made between the
-// start and the end of an arm's draw(), by arm class, query kind and cell relative to the piston.
-struct ArmLightCtx {
-    bool       active{};
-    ::BlockPos piston{};
-    int        cls{};
-    int        state{};
-};
-thread_local ArmLightCtx tArmLightCtx;
-
-constexpr int kLightSpan  = 5; // relative cells -2..2 on each axis
-constexpr int kLightCells = kLightSpan * kLightSpan * kLightSpan;
-struct LightBucket {
-    std::atomic<uint64_t> n{0};
-    std::atomic<uint64_t> dark{0};
-};
-LightBucket           gLightBuckets[16][3][kLightCells + 1]; // [cls][kind][rel or far]
-std::atomic<uint64_t> gLightDarkLogged{0};
-std::atomic<uint64_t> gLightMoveNear{0};
-std::atomic<uint64_t> gLightMoveFar{0};
 std::atomic<uint64_t> gLightFixWindows{0};
 std::atomic<uint64_t> gLightFixHeadQueries{0};
 std::atomic<uint64_t> gLightFixRewrites{0};
 std::atomic<uint64_t> gLightFixRawDark{0};
-
-// kind 0 getBrightness (value 0..1), 1 getBrightnessPair, 2 getLightColor (value = brighter channel / 15).
-void probeLightQuery(
-    ::BlockSource const& source,
-    int                  kind,
-    ::BlockPos const&    pos,
-    bool                 dark,
-    float                value,
-    int                  sky      = -1,
-    int                  block    = -1,
-    int                  minLight = -1
-) {
-    auto const& ctx     = tArmLightCtx;
-    int const   dx      = pos.x - ctx.piston.x + 2;
-    int const   dy      = pos.y - ctx.piston.y + 2;
-    int const   dz      = pos.z - ctx.piston.z + 2;
-    bool const  outside = dx < 0 || dy < 0 || dz < 0 || dx >= kLightSpan || dy >= kLightSpan || dz >= kLightSpan;
-    auto&       b = gLightBuckets[ctx.cls][kind][outside ? kLightCells : (dx * kLightSpan + dy) * kLightSpan + dz];
-    b.n.fetch_add(1, std::memory_order_relaxed);
-    if ((ctx.cls & 8) != 0 && (outside ? gLightMoveFar : gLightMoveNear).fetch_add(1, std::memory_order_relaxed) < (outside ? 60u : 200u)) {
-        std::lock_guard const guard(gProbeMutex);
-        probeLineLocked(
-            "armLightMove kind=%d cls=%d st=%d piston=%d,%d,%d at=%d,%d,%d rel=%d,%d,%d val=%.2f blk=%s sky=%d bl=%d min=%d\n",
-            kind,
-            ctx.cls,
-            ctx.state,
-            ctx.piston.x,
-            ctx.piston.y,
-            ctx.piston.z,
-            pos.x,
-            pos.y,
-            pos.z,
-            pos.x - ctx.piston.x,
-            pos.y - ctx.piston.y,
-            pos.z - ctx.piston.z,
-            value,
-            const_cast<::BlockSource&>(source).getBlock(pos).getTypeName().c_str(),
-            sky,
-            block,
-            minLight
-        );
-    }
-    if (!dark) return;
-    b.dark.fetch_add(1, std::memory_order_relaxed);
-    if (gLightDarkLogged.fetch_add(1, std::memory_order_relaxed) >= 150) return;
-    std::lock_guard const guard(gProbeMutex);
-    probeLineLocked(
-        "armLightDark kind=%d cls=%d st=%d piston=%d,%d,%d rel=%d,%d,%d val=%.2f blk=%s\n",
-        kind,
-        ctx.cls,
-        ctx.state,
-        ctx.piston.x,
-        ctx.piston.y,
-        ctx.piston.z,
-        pos.x - ctx.piston.x,
-        pos.y - ctx.piston.y,
-        pos.z - ctx.piston.z,
-        value,
-        const_cast<::BlockSource&>(source).getBlock(pos).getTypeName().c_str()
-    );
-}
-
-// Samples the three candidate cells (first/spread logging), then opens the window in which the hooks count the
-// game's own light queries. probeArmLightEnd() closes it after draw().
-void probeArmLight(
-    ::BlockActor&                entity,
-    ::BlockSource&               source,
-    ::Vec3 const&                position,
-    std::optional<::Vec3> const& offset,
-    bool                         shifted,
-    bool                         cargo,
-    bool                         nested
-) {
-    tArmLightCtx.active = false;
-    if (gProbePerfOnly.load(std::memory_order_relaxed)) return;
-    probeArmLightSample(entity, source, position, offset, shifted, cargo, nested);
-    auto&      piston = static_cast<::PistonBlockActor&>(entity);
-    auto const state  = static_cast<int>(piston.mState);
-    bool const moving = state == 1 || state == 3;
-    tArmLightCtx      = {
-        true,
-        entity.mPosition.get(),
-        (shifted ? 1 : 0) | (cargo ? 2 : 0) | (nested ? 4 : 0) | (moving ? 8 : 0),
-        state
-    };
-}
-
-void probeArmLightEnd() { tArmLightCtx.active = false; }
 
 // [0..7] cells the poll never found empty, [8..15] cells it found empty at least once.
 std::atomic<uint64_t> gLandDelayHist[16]{};
@@ -2395,8 +2258,7 @@ void probeArmMoved(::BlockPos const& from, ::BlockPos const& to, uint64_t action
     );
 }
 
-// The game's instance of a managed cell names another piston than the one the cell was built from; it draws beside
-// our proxy. Two rows per action, 400 in all.
+// The game's instance names another piston than the cell's and draws beside our proxy; two rows per action, 400 total.
 void probePosMismatch(::BlockPos const& cell, ::MovingBlockActor const& moving, StateRef const& state) {
     static std::atomic<uint64_t>             lines{0};
     static std::unordered_map<uint64_t, int> perAction; // guarded by gProbeMutex
@@ -2496,33 +2358,6 @@ void probeRound33Locked() {
             h(7)
         );
     }
-    for (int cls = 0; cls < 16; ++cls)
-        for (int kind = 0; kind < 3; ++kind)
-            for (int cell = 0; cell <= kLightCells; ++cell) {
-                auto const n = gLightBuckets[cls][kind][cell].n.load(std::memory_order_relaxed);
-                if (n == 0) continue;
-                auto const dark = gLightBuckets[cls][kind][cell].dark.load(std::memory_order_relaxed);
-                if (cell == kLightCells) {
-                    probeLineLocked(
-                        "armLightQ cls=%d kind=%d rel=far n=%llu dark=%llu\n",
-                        cls,
-                        kind,
-                        static_cast<unsigned long long>(n),
-                        static_cast<unsigned long long>(dark)
-                    );
-                    continue;
-                }
-                probeLineLocked(
-                    "armLightQ cls=%d kind=%d rel=%d,%d,%d n=%llu dark=%llu\n",
-                    cls,
-                    kind,
-                    cell / (kLightSpan * kLightSpan) - 2,
-                    cell / kLightSpan % kLightSpan - 2,
-                    cell % kLightSpan - 2,
-                    static_cast<unsigned long long>(n),
-                    static_cast<unsigned long long>(dark)
-                );
-            }
 }
 
 // A translucent proxy dispatched in the opaque pass.
@@ -3075,8 +2910,7 @@ void probeFrameEnd() {
                 );
             }
         }
-        // The world holds a block in a settled cell, yet neither a proxy, the game's instance nor a committed mesh
-        // draws it.
+        // A settled cell holds a block, yet no proxy, game instance or committed mesh draws it.
         if (state != PushState::Animating
             && (drawer == PushDrawer::Proxy || drawer == PushDrawer::Mesh || drawer == PushDrawer::Vanilla)) {
             auto const seenIt = gProbeTally.find(pos);
@@ -3138,8 +2972,7 @@ void probeFrameEnd() {
             vanishWatch.erase(pos);
             cell.vanishFrames = 0;
         }
-        // A carried block actor is entity-rendered, so a committed mesh says nothing about it being visible. This runs
-        // before the drawer filter below so Done cells get here too; the tally is looked up on its own for that reason.
+        // Carried actors are entity-rendered, so a mesh proves nothing; checked before the filter so Done cells count.
         if (rec.timeline.carriesActor()) {
             ProbeTally        noTally;
             auto const        found        = gProbeTally.find(pos);
@@ -3664,8 +3497,7 @@ thread_local std::chrono::steady_clock::time_point tPrevFrameEnd{};
 thread_local uint32_t                              tHitchLines  = 0;
 constexpr uint64_t                                 kHitchWorkUs = 1000;
 
-// Frame thread. When no render-chunk build starts although our re-mesh requests keep coming, drop a marker file for an
-// external stack dump of the stalled pipeline.
+// Frame thread. Logs a line when no render-chunk build starts although re-mesh requests keep coming.
 void probeFreezeWatch(std::chrono::steady_clock::time_point now) {
     static uint64_t                              lastStarts = 0;
     static uint64_t                              askAtStart = 0;
@@ -3700,17 +3532,8 @@ void probeFreezeWatch(std::chrono::steady_clock::time_point now) {
         static_cast<unsigned long long>(asked),
         static_cast<unsigned long long>(asked - askAtStart)
     );
-    {
-        std::lock_guard const guard(gProbeMutex);
-        probeLineLocked("%s", line);
-    }
-    if (auto* const mod = ll::mod::NativeMod::current().get()) {
-        std::FILE* marker = nullptr;
-        if (fopen_s(&marker, (mod->getModDir() / "freeze.flag").string().c_str(), "wb") == 0 && marker) {
-            std::fputs(line, marker);
-            std::fclose(marker);
-        }
-    }
+    std::lock_guard const guard(gProbeMutex);
+    probeLineLocked("%s", line);
 }
 // Called once per real frame with that frame's work. Frames over kHitchWorkUs get a line naming the scopes behind them.
 void probeFrameSample(uint64_t workTicks, std::chrono::steady_clock::time_point now) {
@@ -4339,8 +4162,7 @@ bool clockInvalidatedLocked() {
 
 bool hasAnimationStateLocked() { return !gPistonVisuals.empty() || !gActionVisuals.empty() || !gCells.empty(); }
 
-// Caller holds gAnimMutex. Finished cells give up their proxy at once and keep hiding the game's own instance for a
-// while, so a lingering MovingBlock cannot draw a second copy.
+// Caller holds gAnimMutex. Finished cells drop their proxy and keep hiding the game's instance for a while.
 void reapLocked(int64_t tick, Graveyard& drop) {
     // Only finished cells have anything to reap.
     if (!gCensus.any(core::TraitDone)) return;
@@ -4452,9 +4274,7 @@ void sweepActions(::BlockSource& region) {
     rebuildCells(region, ticked);
 }
 
-// Worker threads build chunk meshes; the MovingBlock renderer tessellates on the render thread and must pass.
-// A cell a mesh build tessellated as the real block after its re-mesh request. Counts only once the build is
-// uploaded; a superseded build never reaches endRebuild.
+// A cell a build tessellated as the real block after its re-mesh request; counts only once that build commits.
 void releasedToMesher(::BlockPos const& pos) {
     if (tBuild) {
         tBuild->released(pos);
@@ -4518,8 +4338,7 @@ bool meshSuppressedIn(core::MeshView const& view, ::BlockPos const& pos, bool& r
 void probeCheckMesh(::BlockPos const& pos);
 #endif
 
-// Worker threads build chunk meshes; the MovingBlock renderer tessellates on the render thread and must pass.
-// `release` says the caller must report the tessellation result through tessellatedForMesher.
+// Worker threads build meshes; the render thread's MovingBlock tessellation passes. `release` asks for the result.
 bool meshSuppressed(::BlockPos const& pos, ::Block const& block, bool& release) {
     release = false;
     if (tRenderDepth > 0 || !gMeshWatch.load(std::memory_order_relaxed)) return false;
@@ -4714,11 +4533,7 @@ void meshBuildCommitted(::RenderChunkGeometry const* geometry) {
         }
         syncCellLocked(found->first, found->second, true);
     }
-    // Cells of this chunk still awaiting a mesh were not tessellated as real blocks by this build. The wait ends
-    // here, never on a timer: a build that started after the awaiting state was published and never visited the
-    // cell has nothing to show (the mesher skips it), so it is live. A build that may have started before, that met
-    // a stale chunk copy, or that went untracked cannot tell, so the platform asks for a fresh one. A cell the build
-    // drew empty beside a neighbour that still animates keeps waiting; that neighbour's re-mesh rebuilds it.
+    // No timer: a later build that skipped an awaiting cell hands it over, unsure builds re-ask, held cells wait.
     if (geometry && gCensus.any(core::TraitAwaiting)) {
         bool again = false;
         for (auto& [cell, rec] : gCells) {
@@ -4923,8 +4738,7 @@ std::array<float, 4> probePack(std::optional<::Vec3> const& value) {
 
 constexpr uint32_t kCheckPeriod = 64;
 
-// Every `period`-th call per call site and thread: `answer(StateRef)` on a fresh render view and on the live tables
-// under gAnimMutex must agree. The lock wait is kept out of the timings.
+// Every `period`-th call per site and thread, the cached view and the live tables must agree; lock wait untimed.
 template <class Answer>
 void probeCrossCheck(uint32_t period, Answer&& answer) {
     if (gProbePerfOnly.load(std::memory_order_relaxed)) return;
@@ -5009,8 +4823,7 @@ void requestEarlyRemesh(PushCell const& rec) {
     gEarlyRemesh.push_back(rec.cell);
 }
 
-// Relative to the MovingBlock's own (target) cell, same convention as native getDrawPos. Only our own proxies are
-// positioned here; the game's instances are either hidden or left alone.
+// Relative to the MovingBlock's own cell, like native getDrawPos; only our proxies are positioned here.
 std::optional<::Vec3> visualDrawOffset(::MovingBlockActor const& moving, float alpha) {
     if (!gStateWatch.load(std::memory_order_relaxed)) return std::nullopt;
     ViewPin pin;
@@ -5021,8 +4834,7 @@ std::optional<::Vec3> visualDrawOffset(::MovingBlockActor const& moving, float a
     LazyTime const time{alpha};
     auto const     now = time.get();
     gLastVisualTime.store(now, std::memory_order_relaxed);
-    // A carried actor stays on the proxy until the landed one shows up, so timelines never ask for an early mesh then.
-    // The expected build time in visual ticks, plus the frame that shows it.
+    // Expected build time in visual ticks plus the showing frame; carried actors never ask for an early mesh.
     auto const lead = gMeshLatency.load(std::memory_order_relaxed) * gTicksPerSecond.load(std::memory_order_relaxed)
                     + gFrameStep.load(std::memory_order_relaxed);
     if (rec.timeline.shouldRequestRemesh(now, std::min(lead, kMaxEarlyLeadTicks))) requestEarlyRemesh(rec);
@@ -5057,8 +4869,7 @@ std::optional<::Vec3> landedBodyOffset(::BlockPos const& pistonPos, float alpha)
     return result;
 }
 
-// What a game MovingBlock of a live action needs: nothing, a first proxy, or its existing proxy pointed at the game's
-// rebuilt actor.
+// What a game MovingBlock needs: nothing, a first proxy, or its proxy pointed at the game's rebuilt actor.
 struct SnapshotPlan {
     enum class Kind : uint8_t { None, Create, Follow };
     Kind                                kind{Kind::None};
@@ -5108,8 +4919,7 @@ struct NewProxy {
     OPTIPISTON_PROBE_DO(uint64_t startFrame{};)
 };
 
-// Only the game is called here, never gAnimMutex. There is no proxy pool: the engine derives state from the
-// position at construction that cannot be reset reliably, so every cell gets a fresh one.
+// Calls only the game, never under gAnimMutex. No proxy pool: construction state cannot be reset reliably.
 NewProxy buildProxy(::MovingBlockActor& moving, SnapshotPlan const& plan) {
     OPTIPISTON_PERF_SCOPE(perf, ProxyCreate);
     NewProxy made;
@@ -5134,8 +4944,7 @@ NewProxy buildProxy(::MovingBlockActor& moving, SnapshotPlan const& plan) {
     return made;
 }
 
-// Caller holds gAnimMutex. A piston pushed while its arm still plays takes that motion along: the actors that draw
-// it at the new cell look it up by position, and a landing packet in the same direction must not restart it.
+// Caller holds gAnimMutex. A piston pushed mid-motion carries its arm's motion along to the new cell.
 void moveArmLocked(::BlockPos const& from, ::BlockPos const& to, std::string const& wrapped) {
     if (wrapped.find("piston") == std::string::npos || wrapped.find("arm_collision") != std::string::npos) return;
     auto const src = gPistonVisuals.find(from);
@@ -5156,8 +4965,7 @@ void moveArmLocked(::BlockPos const& from, ::BlockPos const& to, std::string con
     bumpLocked();
 }
 
-// Caller holds gAnimMutex. A proxy whose action ended meanwhile, or whose cell already has one for the action or a
-// newer one, is dropped instead.
+// Caller holds gAnimMutex. Dropped if its action ended or its cell already has a proxy for this or a newer action.
 void commitProxyLocked(NewProxy& made, Graveyard& drop) {
     auto const existing = gCells.find(made.cell);
     if (!gActionVisuals.contains(made.action) || (existing != gCells.end() && existing->second.action == made.action)) {
@@ -5267,8 +5075,7 @@ void followGameActor(::MovingBlockActor const& moving, SnapshotPlan const& plan)
     wrappedActorOf(*plan.existing)    = carriedActorOf(carried);
 }
 
-// Creates the proxy for a game MovingBlock of a live action, or refreshes the one it already has. Returns true if a
-// proxy was created now. Runs on the render thread; the engine is never called with gAnimMutex held.
+// Creates or refreshes the proxy for a game MovingBlock; true if created. Render thread, never under gAnimMutex.
 bool snapshotMoving(::MovingBlockActor& moving, ::BlockSource& region, bool checkPlaced) {
     if (!gStateWatch.load(std::memory_order_relaxed)) return false;
     // A detached instance is an older push of the cell; only the registered one may create or follow.
@@ -5314,8 +5121,7 @@ bool vanillaHidden(::MovingBlockActor const& moving, bool attached) {
     return hidden;
 }
 
-// Looks for the game's MovingBlocks of recently started actions where their blocks are heading, since the camera
-// does not always hand them to a renderer.
+// Finds the game's MovingBlocks of new actions at their targets, since the camera does not always render them.
 void scanTargets(::BlockSource& region) {
     if (!gStateWatch.load(std::memory_order_relaxed)) return;
     OPTIPISTON_PERF_SCOPE(perf, ScanTargets);
@@ -5418,8 +5224,7 @@ bool holdLandedLocked(::BlockPos const& cell) {
     return true;
 }
 
-// Runs before the packet applies, so the mesh rebuild it triggers already skips the landed block. Takes the lock
-// once, and only if a block really lands.
+// Runs before the packet applies, so its re-mesh already skips the landed block; locks only if a block lands.
 template <class Infos>
 void holdLandedBlocks(Infos const& infos) {
     thread_local std::vector<::BlockPos> landed;
@@ -5467,8 +5272,7 @@ void holdPlacedCell(::BlockSource& region, ::BlockPos const& cell) {
     flushLocked();
 }
 
-// The occluder's per-chunk bitset names no block, so it hides a suppressed neighbour like a plain solid one;
-// the face hook must answer the same for the face between two managed cells.
+// The occluder hides a suppressed neighbour like a solid one, so the face hook must agree between managed cells.
 bool faceAgainstSuppressedNeighbor(::BlockPos const& pos, int face, ::Block const& self) {
     static constexpr int d[6][3]{
         {0,  -1, 0 },
@@ -5489,8 +5293,7 @@ bool faceAgainstSuppressedNeighbor(::BlockPos const& pos, int face, ::Block cons
     return self.getTypeName() == *it->second.wrapped;
 }
 
-// Chunk meshes skip faces against the target cell, but it stays empty on screen while the proxy is still gliding
-// in. Returns 0 if shown, 1 landed, 2 still a moving_block.
+// Faces against a target cell still empty on screen while the proxy glides in. 0 shown, 1 landed, 2 moving_block.
 int neighborHidden(::BlockPos const& pos) {
     if (tRenderDepth > 0 || !gFaceWatch.load(std::memory_order_relaxed)) return 0;
     MeshViewPin pin;
@@ -5506,8 +5309,7 @@ bool touchesLanded(::BlockPos const& pos) {
     return pin.get().touchesSuppressed(cellOf(pos));
 }
 
-// The landed cell's own actor was drawn this frame; a handover may end. Only a note is left, which the timeline
-// absorbs on the next tick or frame.
+// The landed cell's actor was drawn this frame; the timeline reads this note on its next tick or frame.
 void noteActorShown(::BlockPos const& cell) {
     if (!gActorWatch.load(std::memory_order_relaxed)) return;
     ViewPin     pin;
@@ -5527,8 +5329,7 @@ void noteDispatched(::BlockActor const& actor) {
     noteActorShown(actor.mPosition.get());
 }
 
-// A landed block's own actor (a chest, a spawner's mob, a lectern's book...) would sit at its final cell while the
-// proxy still carries a copy of it in. Pistons are excluded: drawArm keeps their head on the moving body.
+// A landed block's own actor would sit at its final cell while the proxy still carries it in; pistons excepted.
 bool landedActorCovered(::BlockActor const& entity) {
     if (tRenderDepth > 0 || !gLandedWatch.load(std::memory_order_relaxed)) return false;
     if (entity.mType == ::BlockActorType::PistonArm || entity.mType == ::BlockActorType::MovingBlock) return false;
@@ -5725,8 +5526,7 @@ void drawProxies(::BaseActorRenderContext& context, bool renderAlphaLayer) {
     }
 }
 
-// Entries older than this many rounds are dropped once the tables grow, so destroyed pistons cannot pile up.
-// Stepped pistons count level ticks; a head claim counts rendered frames. The window is intentionally unchanged.
+// Entries older than this are pruned once tables grow; stepped pistons count level ticks, head claims frames.
 constexpr int64_t kHeadStaleTicks = 24000;
 constexpr size_t  kHeadPruneAt    = 4096;
 
@@ -5781,8 +5581,7 @@ HeadTable& headTableFor(uint64_t round) {
     return table;
 }
 
-// Piston NBT carries no interlock data, so a client-side piston rebuilt from a block-actor packet would stay
-// InitialNotVisible until the engine's timeout and drop the arm for about three ticks.
+// Piston NBT has no interlock data, so a piston rebuilt from a packet would hide its arm for about three ticks.
 #if OPTIPISTON_MC >= 2632
 // PistonBlockActor's own constructor is not exported here; the base that owns the interlock data is.
 LL_TYPE_INSTANCE_HOOK(
@@ -5837,9 +5636,7 @@ LL_TYPE_INSTANCE_HOOK(
     if (client) sweepActions(region);
     if (!smoothPistonRenderEnabled()) return;
 
-    // Unconditional, because a hidden piston is never handed to the renderer: a fix that lives in the render
-    // hook cannot run for the very frames the arm is missing. Tick is the only path that still executes while
-    // hidden.
+    // Unconditional: a hidden piston never reaches the renderer, and tick is the only path that runs while hidden.
     auto& interlock = mTerrainInterlockData.get();
     if (interlock.mRenderVisibilityState != VisibilityState::Visible || interlock.mHasBeenDelayedDeleted) {
         interlock.mRenderVisibilityState = VisibilityState::Visible;
@@ -5882,9 +5679,7 @@ private:
 };
 #endif
 
-// The game lights an arm from its head cell. After the logic has landed a carried opaque block there, that cell
-// stores no light while our extended visual window still draws the arm, which then renders black. For the span of
-// one arm draw the head cell's light is raised to the piston cell's. Outside the span nothing is touched.
+// A landed opaque block leaves the head cell 0/0, so the arm drawn later would be black; it gets the piston's light.
 struct ArmLightFix {
     bool       active{};
     ::BlockPos piston{};
@@ -5917,8 +5712,7 @@ private:
     ArmLightFix mSaved;
 };
 
-// Shared by the renderer hooks and, where those are not exported, the dispatcher hook. position is the draw's
-// own copy; draw() renders with whatever it holds.
+// Shared by the renderer hooks and the dispatcher hook; position is the draw's own copy that draw() renders with.
 template <class Draw>
 void drawArm(
     ::BaseActorRenderContext& renderContext,
@@ -5934,14 +5728,12 @@ void drawArm(
     bool const enabled = smoothPistonRenderEnabled();
     bool const hidden  = interlock.mRenderVisibilityState == VisibilityState::InitialNotVisible;
 
-    // Same-cell pistons cannot be found by walking the chunk collections - each instance only ever sees itself
-    // there - so one head per cell is elected here instead, fresh every rendered frame.
+    // Same-cell pistons cannot see each other in the chunk, so one head per cell is elected every rendered frame.
     bool const isArm = entity.mType == ::BlockActorType::PistonArm;
     // Drawn by a MovingBlock carrying it; a replay can leave that cell as air instead of moving_block.
     bool const nested = tRenderDepth > 0;
     OPTIPISTON_PROBE_DO(split.stage(ArmStage::Setup);)
-    // A piston in a moving_block cell is cargo being pushed by another piston rather than the one driving the
-    // animation, so it must lose to an actively extending head instead of competing with it.
+    // A piston in a moving_block cell is cargo, so it loses to an actively extending head.
     bool const isCargo =
         isArm && (nested || renderSource.getBlock(entity.mPosition).getTypeName() == "minecraft:moving_block");
     OPTIPISTON_PROBE_DO(split.stage(ArmStage::Cargo); if (enabled && isArm)++ tArmTally.arms;
@@ -6004,10 +5796,9 @@ void drawArm(
     if (!bodyOffset || (bodyOffset->x == 0.0f && bodyOffset->y == 0.0f && bodyOffset->z == 0.0f)) {
         OPTIPISTON_PROBE_DO(if (enabled && isArm) probeArmDrawn(entity.mPosition.get(), position, nested);)
         OPTIPISTON_PROBE_DO(
-            if (enabled && isArm) probeArmLight(entity, renderSource, position, bodyOffset, false, isCargo, nested);
+            if (enabled && isArm) probeArmLightSample(entity, renderSource, position, bodyOffset, false, isCargo, nested);
         )
         draw();
-        OPTIPISTON_PROBE_DO(probeArmLightEnd();)
         return;
     }
     // Shift the arm with its still-moving body.
@@ -6018,10 +5809,9 @@ void drawArm(
     position.z       += bodyOffset->z;
     OPTIPISTON_PROBE_DO(if (enabled && isArm) probeArmDrawn(entity.mPosition.get(), position, nested);)
     OPTIPISTON_PROBE_DO(
-        if (enabled && isArm) probeArmLight(entity, renderSource, position, bodyOffset, true, isCargo, nested);
+        if (enabled && isArm) probeArmLightSample(entity, renderSource, position, bodyOffset, true, isCargo, nested);
     )
     draw();
-    OPTIPISTON_PROBE_DO(probeArmLightEnd();)
     position = saved;
 }
 
@@ -6044,8 +5834,7 @@ void drawMoving(::BaseActorRenderContext&, ::BlockSource& source, ::BlockActor& 
     auto& interlock = interlockOf(entity);
     gFrameDrewActors.store(true, std::memory_order_relaxed);
 
-    // A MovingBlock rebuilt mid-animation starts hidden just like the piston does. Only lift that initial
-    // state: the retirement logic below owns DelayedDestructionNotVisible and must not be overridden.
+    // A MovingBlock rebuilt mid-animation starts hidden; lift only that, the retirement below owns its own state.
     if (interlock.mRenderVisibilityState == VisibilityState::InitialNotVisible) {
         interlock.mRenderVisibilityState = VisibilityState::Visible;
     }
@@ -6072,30 +5861,23 @@ void drawMoving(::BaseActorRenderContext&, ::BlockSource& source, ::BlockActor& 
 
     auto const& cellBlock = source.getBlock(entity.mPosition);
 
-    // An air-wrapped MovingBlock has no replacement block of its own coming, so hiding it while its cell is
-    // still empty would open a hole. Once a real block occupies the cell there is nothing left for it to cover.
+    // An air-wrapped MovingBlock has no block coming, so it stays drawn until something fills its cell.
     bool const coversNothing = wrappedAir(*movingPtr) && cellBlock.isAir();
 
-    // getDrawPos collapses as soon as mProgress reaches 1, but the renderer keeps lerping mLastProgress towards
-    // it for another tick. Both fields at 1 is the only state where no interpolation is left.
+    // Interpolation is over only when both mProgress and mLastProgress are 1.
     auto* const owner   = owningPiston(*movingPtr, source);
     bool const  arrived = owner != nullptr && owner->mProgress >= 1.0f && owner->mLastProgress >= 1.0f;
 
-    // Detached means the block entity no longer belongs to this cell: the block has been handed to the next
-    // MovingBlock one cell along, so this cell is meant to be empty and keeping it drawn only redraws the block
-    // at the position it already left.
+    // Detached: the block moved on to the next MovingBlock, so this cell should be empty.
     bool const detached = source.getBlockEntity(entity.mPosition) != &entity;
 
-    // A piston body never hands its block to a neighbour, so for it detachment only means the cell
-    // re-registered a fresh instance. Retiring it left the cell with neither entity nor replacement block for
-    // several frames, which is the piston vanishing mid-extension.
+    // A piston body never hands its block on, so detachment means a fresh instance; retiring it made it vanish.
     bool const isPistonBody = wrappedName(*movingPtr).find("piston") != std::string::npos;
 
     if (coversNothing || isPistonBody) {
         // Leave it to vanilla: nothing to hold on screen, nothing to hide.
     } else if (movingPtr->mPreserved && arrived && detached) {
-        // Retire on the first frame all three hold. Also requiring a real block in the cell was too strict: the
-        // replacement can arrive several frames late and the block stayed visible in its old cell until then.
+        // Retire once all three hold; waiting for the real block too left it in its old cell for frames.
         interlock.mRenderVisibilityState = VisibilityState::DelayedDestructionNotVisible;
         interlock.mHasBeenDelayedDeleted = true;
     }
@@ -6195,18 +5977,16 @@ LL_TYPE_INSTANCE_HOOK(
 void relaxMovingBlendDepth(::MovingBlockActorRenderer& renderer) {
     thread_local uint32_t calls = 0;
     if ((calls++ & 255u) != 0) return;
-    int index = 0;
     for (auto& slot : renderer.mBlockMaterials) {
         auto const* const info = slot.get().mRenderMaterialInfoPtr.get();
         auto* const       mat  = info ? info->mPtr.get() : nullptr;
-        ++index;
         if (!mat || !mat->blendStateDescription.get().enableBlend) continue;
         auto& mask = mat->depthStencilStateDescription.get().depthWriteMask;
         if (static_cast<int>(mask) == 0) continue;
         mask = static_cast<::mce::DepthWriteMask>(0);
         OPTIPISTON_PROBE_DO(
             std::lock_guard const guard(gProbeMutex);
-            probeLineLocked("materialRelaxed index=%d name=%s\n", index - 1, info->mHashedName.get().c_str());
+            probeLineLocked("materialRelaxed name=%s\n", info->mHashedName.get().c_str());
         )
     }
 }
@@ -6236,8 +6016,7 @@ using DispatchedActor = ::BlockActor;
 ::BlockActor& dispatchedActor(DispatchedActor& actor) { return actor; }
 #endif
 
-// Every block actor type reaches its renderer through the dispatcher; which overload the camera calls is not known,
-// so both skip a covered landed actor.
+// Either dispatcher overload may be called, so both skip a covered landed actor.
 LL_TYPE_INSTANCE_HOOK(
     OptiPistonLandedActorHook,
     ll::memory::HookPriority::Normal,
@@ -6395,12 +6174,7 @@ LL_TYPE_INSTANCE_HOOK(
     tMeshGeometry    = this;
     MeshBuildScope scope(this);
     OPTIPISTON_PROBE_DO(ProbeRebuildClock clock;)
-    OPTIPISTON_OBSERVE_DO(
-        auto const observedPos = mPosition.get();
-        observe::buildBegin(this, observedPos.x, observedPos.y, observedPos.z, mBuildVersionNumber);
-    )
     origin(builder, lightingType, forExport, lightingModelCapabilities, caps);
-    OPTIPISTON_OBSERVE_DO(observe::buildEnd();)
     OPTIPISTON_PROBE_DO(probeMeshBuildReturned(this, clock, &builder);)
     tMeshGeometry = saved;
 }
@@ -6430,7 +6204,6 @@ LL_TYPE_INSTANCE_HOOK(
     bool                            useSplitStream
 ) {
     OPTIPISTON_PROBE_DO(tProbeCommitChain = probeCallChain(); tProbeCommitBuilder = &builder;)
-    OPTIPISTON_OBSERVE_DO(auto const observedCommitT0 = observe::commitBegin();)
     origin(
         builder,
         bufferResourceService,
@@ -6439,7 +6212,6 @@ LL_TYPE_INSTANCE_HOOK(
         renderMetadata,
         useSplitStream
     );
-    OPTIPISTON_OBSERVE_DO(observe::buildCommit(this, observedCommitT0);)
     tMeshGeometry = nullptr;
     meshBuildCommitted(this);
 }
@@ -6540,17 +6312,14 @@ LL_TYPE_INSTANCE_HOOK(
     ::FrameRenderObject const& renderObj
 ) {
     OPTIPISTON_PROBE_DO(probeFrameBegin();)
-    OPTIPISTON_OBSERVE_DO(observe::frameBegin();)
     origin(screenContext, renderObj);
-    OPTIPISTON_OBSERVE_DO(observe::frameEnd();)
     onFrameEnd();
     OPTIPISTON_PROBE_DO(probeRealFrameEnd();)
     OPTIPISTON_PROBE_DO(gRealFrame.fetch_add(1, std::memory_order_relaxed);)
 }
 #endif
 
-// Runs right after the main camera collected its entities: the game's MovingBlocks of a fresh action are found and
-// copied before the first draw of the frame.
+// Right after the main camera collects entities, so a fresh action's MovingBlocks are copied before the first draw.
 LL_TYPE_INSTANCE_HOOK(
     OptiPistonPlayerQueueEntitiesHook,
     ll::memory::HookPriority::Normal,
@@ -6578,7 +6347,6 @@ LL_TYPE_INSTANCE_HOOK(
     bool                      renderAlphaLayer
 ) {
     OPTIPISTON_PROBE_DO(probeRenderBlockEntities(renderAlphaLayer);)
-    OPTIPISTON_OBSERVE_DO(observe::renderBlockEntities(renderAlphaLayer);)
     RenderViewScope scope;
     origin(renderContext, renderAlphaLayer);
     if (smoothPistonRenderEnabled() && gStateWatch.load(std::memory_order_relaxed) && animationActive())
@@ -6641,8 +6409,7 @@ LL_TYPE_INSTANCE_HOOK(
     --tBlockActorDataDepth;
     if (!held || tBlockActorDataApplied) return;
     std::lock_guard const guard(gAnimMutex);
-    // Data from an earlier clock run, or older than the longest visual, could only start an already expired visual.
-    // A live world never changes run, so the age bound is what keeps this list short.
+    // Data from another clock run or older than the longest visual could only start an expired visual.
     auto const maxAge = static_cast<int64_t>(std::ceil(core::MaxDurationTicks));
     std::erase_if(gHeldPistonData, [&](HeldPistonData const& entry) {
         return !sameClockRun(entry.clock, held->clock) || held->clock.tick - entry.clock.tick > maxAge;
@@ -6706,7 +6473,6 @@ LL_TYPE_INSTANCE_HOOK(
     float                      a
 ) {
     OPTIPISTON_PERF_SCOPE(perf, DrawPos);
-    OPTIPISTON_OBSERVE_DO(observe::drawPos(*this, a, tProxyDraw == this);)
     if (tRenderDepth > 0 && animationActive()) {
         if (auto const offset = visualDrawOffset(*this, a)) {
             OPTIPISTON_PROBE_DO(probeProxyDrawPos(
@@ -6753,18 +6519,15 @@ LL_TYPE_INSTANCE_HOOK(
     bool              useCalcWithCache
 ) {
     OPTIPISTON_PERF_SCOPE(perf, MeshHook);
-    OPTIPISTON_OBSERVE_DO(observe::tessellate(pos.x, pos.y, pos.z, &block);)
     bool release = false;
     if (meshSuppressed(pos, block, release)) {
         OPTIPISTON_PROBE_DO(probeMeshCall(true, pos, true);)
-        OPTIPISTON_OBSERVE_DO(observe::tessellated(pos.x, pos.y, pos.z, &block, false, true);)
         return false;
     }
     OPTIPISTON_PROBE_DO(probeMeshCall(true, pos, false);)
     OPTIPISTON_PROBE_DO(perf.pause();)
     auto const result = origin(tessellator, block, pos, useCalcWithCache);
     if (release) tessellatedForMesher(pos, result);
-    OPTIPISTON_OBSERVE_DO(observe::tessellated(pos.x, pos.y, pos.z, &block, result, false);)
     OPTIPISTON_PROBE_DO(if (tProbeProxyLight.active) {
         auto const& own = tProbeProxyLight.cell;
         if (pos.x == own.x && pos.y == own.y && pos.z == own.z) {
@@ -6789,11 +6552,9 @@ LL_TYPE_INSTANCE_HOOK(
     ::AirAndSimpleBlockBits const* airAndSimpleBlocks
 ) {
     OPTIPISTON_PERF_SCOPE(perf, MeshHook);
-    OPTIPISTON_OBSERVE_DO(observe::tessellate(pos.x, pos.y, pos.z, &block);)
     bool release = false;
     if (meshSuppressed(pos, block, release)) {
         OPTIPISTON_PROBE_DO(probeMeshCall(false, pos, true);)
-        OPTIPISTON_OBSERVE_DO(observe::tessellated(pos.x, pos.y, pos.z, &block, false, true);)
         return false;
     }
     OPTIPISTON_PROBE_DO(probeMeshCall(false, pos, false);)
@@ -6801,7 +6562,6 @@ LL_TYPE_INSTANCE_HOOK(
     OPTIPISTON_PROBE_DO(perf.pause();)
     auto const result = origin(tessellator, block, pos, faces, noCache ? nullptr : airAndSimpleBlocks);
     if (release) tessellatedForMesher(pos, result);
-    OPTIPISTON_OBSERVE_DO(observe::tessellated(pos.x, pos.y, pos.z, &block, result, false);)
     OPTIPISTON_PROBE_DO(if (tProbeProxyLight.active) {
         auto const& own = tProbeProxyLight.cell;
         if (pos.x == own.x && pos.y == own.y && pos.z == own.z) {
@@ -6829,8 +6589,7 @@ LL_TYPE_INSTANCE_HOOK(
     return neighborHidden(neighborPos) != 0;
 }
 
-// A plain area change can sit in the render queue for many frames at high framerates; the hidden block needs it
-// now.
+// A plain area change can wait in the render queue for many frames; the hidden block needs it now.
 LL_TYPE_INSTANCE_HOOK(
     OptiPistonImmediateRebuildHook,
     ll::memory::HookPriority::Normal,
@@ -6864,13 +6623,6 @@ void removeHook(bool& installed) {
     installed = false;
 }
 
-#ifndef OPTIPISTON_LIGHT_HOOKS
-#define OPTIPISTON_LIGHT_HOOKS 4
-#endif
-// Off by default: its per-call thread-local read would skew the light hook's own cost.
-#ifndef OPTIPISTON_LIGHT_LOG
-#define OPTIPISTON_LIGHT_LOG 0
-#endif
 // The user-provided copy constructor gives it the same return convention as the game's BrightnessPair.
 struct LightRet {
     std::uint16_t v{}; // low byte sky, high byte block
@@ -6923,8 +6675,7 @@ LL_TYPE_INSTANCE_HOOK(
             if (result.v != raw.v) gLightFixRewrites.fetch_add(1, std::memory_order_relaxed);
         )
     }
-    // A proxy stands in the cell the logic has already settled: once the real block is there the game stores 0/0
-    // for it and the moving copy renders dark. Keep the last lit answer. Neighbors are not changed.
+    // A settled proxy cell reads 0/0 once the real block is there; keep its last lit answer, neighbours unchanged.
     auto const& proxyFix = tProxyLightFix;
     if (proxyFix.active && pos.x == proxyFix.cell.x && pos.y == proxyFix.cell.y && pos.z == proxyFix.cell.z) {
         if (raw.v != 0) {
@@ -6960,22 +6711,6 @@ LL_TYPE_INSTANCE_HOOK(
         }
         if (!resDark) ++tProbeProxyLight.resLit;
     })
-    OPTIPISTON_PROBE_DO(
-        if (OPTIPISTON_LIGHT_LOG && (OPTIPISTON_LIGHT_HOOKS & 4) && tArmLightCtx.active) {
-            int const sky   = raw.v & 0xFF;
-            int const block = raw.v >> 8;
-            probeLightQuery(
-                *this,
-                2,
-                pos,
-                sky == 0 && block == 0,
-                static_cast<float>(std::max(sky, block)) / 15.0f,
-                sky,
-                block,
-                minBlockLight
-            );
-        }
-    )
     OPTIPISTON_PROBE_DO(if (timed) {
         auto const kind = tRenderThread ? 0 : 1;
         gPerfCounts2.lightSeen[kind].fetch_add(1, std::memory_order_relaxed);
@@ -7067,61 +6802,7 @@ void removeLightFix() {
     removeHook<OptiPistonLightColorHook>(gLightFixInstalled[0]);
 }
 
-#if OPTIPISTON_PROBE && OPTIPISTON_MC == 2651 && OPTIPISTON_LIGHT_HOOKS
-// Count the game's own light queries while an arm is drawn. Failing to install them is not fatal.
-LL_TYPE_INSTANCE_HOOK(
-    OptiPistonLightBrightnessHook,
-    ll::memory::HookPriority::Normal,
-    ::BlockSource,
-    &::BlockSource::$getBrightness,
-    float,
-    ::BlockPos const& pos
-) {
-    float const value = origin(pos);
-    if (OPTIPISTON_LIGHT_LOG && tArmLightCtx.active) probeLightQuery(*this, 0, pos, value < 0.05f, value);
-    return value;
-}
-
-using LightPairFn = LightRet (::BlockSource::*)(::BlockPos const&) const;
-
-LL_TYPE_INSTANCE_HOOK(
-    OptiPistonLightPairHook,
-    ll::memory::HookPriority::Normal,
-    ::BlockSource,
-    reinterpret_cast<LightPairFn>(&::BlockSource::getBrightnessPair),
-    LightRet,
-    ::BlockPos const& pos
-) {
-    LightRet const pair = origin(pos);
-    if (OPTIPISTON_LIGHT_LOG && tArmLightCtx.active) {
-        int const sky   = pair.v & 0xFF;
-        int const block = pair.v >> 8;
-        probeLightQuery(*this, 1, pos, sky == 0 && block == 0, static_cast<float>(std::max(sky, block)) / 15.0f, sky, block);
-    }
-    return pair;
-}
-
-
-bool gLightHooks[3]{};
-
-void installLightProbeHooks() {
-    if (OPTIPISTON_LIGHT_HOOKS & 1) (void)installHook<OptiPistonLightBrightnessHook>(gLightHooks[0]);
-    if (OPTIPISTON_LIGHT_HOOKS & 2) (void)installHook<OptiPistonLightPairHook>(gLightHooks[1]);
-}
-
-void removeLightProbeHooks() {
-    removeHook<OptiPistonLightPairHook>(gLightHooks[1]);
-    removeHook<OptiPistonLightBrightnessHook>(gLightHooks[0]);
-}
-#define OPTIPISTON_INSTALL_LIGHT_PROBE() installLightProbeHooks()
-#define OPTIPISTON_REMOVE_LIGHT_PROBE()  removeLightProbeHooks()
-#else
-#define OPTIPISTON_INSTALL_LIGHT_PROBE() ((void)0)
-#define OPTIPISTON_REMOVE_LIGHT_PROBE()  ((void)0)
-#endif
-
-// Hooks in install order; unhooked in reverse. The action hook is last, so no visual starts before everything
-// that finishes it is in place.
+// Hooks in install order, removed in reverse; the action hook is last so no visual starts before its finishers.
 #if OPTIPISTON_MC == 2610
 #define OPTIPISTON_RENDER_HOOKS(X) X(OptiPistonBlockActorDispatchHook) X(OptiPistonLandedActorHook)
 #else
@@ -7187,16 +6868,12 @@ bool hookPistonRender(bool enable) {
             if (!kHooks[i].install(installed[i])) return false;
         }
         installLightFix();
-        OPTIPISTON_INSTALL_LIGHT_PROBE();
-        OPTIPISTON_OBSERVE_DO(observe::install();)
         gInstalled.store(true, std::memory_order_release);
         return true;
     }
 
     if (!gInstalled.load(std::memory_order_acquire)) return true;
 
-    OPTIPISTON_OBSERVE_DO(observe::remove();)
-    OPTIPISTON_REMOVE_LIGHT_PROBE();
     removeLightFix();
     for (std::size_t i = std::size(kHooks); i-- > 0;) kHooks[i].remove(installed[i]);
 

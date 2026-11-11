@@ -28,13 +28,6 @@ option("probe")
     set_description("Build the temporary render diagnostics")
 option_end()
 
--- Observation probes only (no render diagnostics), for frame-rate faithful runs: --probe=n --observe=y.
-option("observe")
-    set_default(false)
-    set_showmenu(true)
-    set_description("Build only the observation probes")
-option_end()
-
 -- levibuildscript reads target_type for the prelink target and the manifest platform.
 option("target_type")
     set_default("client")
@@ -136,9 +129,6 @@ target("OptiPiston")
     add_defines("OPTIPISTON_MC=" .. mc_line.code)
     if not has_config("probe") then
         add_defines("OPTIPISTON_PROBE=0")
-    end
-    if has_config("observe") then
-        add_defines("OPTIPISTON_OBSERVE_ONLY=1")
     end
     on_load(function (target)
         sync_tooth(io, os, path, import("core.base.json"))

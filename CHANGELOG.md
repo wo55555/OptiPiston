@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-11
+
+> Prerelease for every Minecraft line (26.10, 26.20, 26.30, 26.40, 26.50, 26.60). Install the variant for your line, for example `lip install github.com/wo55555/OptiPiston#client_mc26_50@0.3.1`. The configuration format and C API v1 are unchanged. The piston-wall fix has been tested in game on 26.50 only; the other lines build and pass unit tests.
+
 ### Changed
 
 - The arm lighting fix (no black arm or head after retracting with a block) now works on every line instead of 26.50 only. Tested in game on 26.10, 26.20, 26.40, and 26.50; 26.30 and 26.60 build and pass unit tests.
@@ -111,7 +115,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Singleplayer world speed with optional audio and particle scaling.
 - `/optipiston` client command and a C API for Playback's replay clock.
 
-[Unreleased]: https://github.com/wo55555/OptiPiston/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/wo55555/OptiPiston/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/wo55555/OptiPiston/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/wo55555/OptiPiston/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/wo55555/OptiPiston/compare/v0.1.4...v0.2.0
 [0.1.3]: https://github.com/wo55555/OptiPiston/compare/v0.1.2-mc26.20...v0.1.3

@@ -17,6 +17,8 @@ struct PistonSettings {
     std::atomic_bool       enabled{true};
     std::atomic<float>     durationTicks{4.0f};
     std::atomic<TurnStyle> turn{TurnStyle::Corner};
+    // A pushed block is lit like the landed one, and blocks and gives light like the block it carries.
+    std::atomic_bool light{true};
 };
 
 [[nodiscard]] PistonSettings& pistonSettings() noexcept;

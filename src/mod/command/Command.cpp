@@ -56,6 +56,11 @@ void setTurn(CommandOutput& output, core::TurnStyle turn) {
     output.success("optipiston.command.piston.turn"_tr(turnName(turn)));
 }
 
+void setLight(CommandOutput& output, bool light) {
+    OptiPiston::getInstance().updateConfig([light](auto& config) { config.piston.light = light; });
+    output.success("optipiston.command.piston.light"_tr(onOff(light)));
+}
+
 } // namespace
 
 void registerCommands(std::string const& name) {
@@ -92,6 +97,12 @@ void registerCommands(std::string const& name) {
     command.overload().text("piston").text("turn").text("corner").execute(
         [](CommandOrigin const&, CommandOutput& output) { setTurn(output, core::TurnStyle::Corner); }
     );
+    command.overload().text("piston").text("light").text("on").execute([](CommandOrigin const&, CommandOutput& output) {
+        setLight(output, true);
+    });
+    command.overload().text("piston").text("light").text("off").execute(
+        [](CommandOrigin const&, CommandOutput& output) { setLight(output, false); }
+    );
 
     command.overload<SpeedParams>().text("speed").required("value").execute(
         [](CommandOrigin const&, CommandOutput& output, SpeedParams const& params) {
@@ -122,7 +133,8 @@ void registerCommands(std::string const& name) {
             "optipiston.command.status.piston"_tr(
                 onOff(piston.enabled.load()),
                 piston.durationTicks.load(),
-                turnName(piston.turn.load())
+                turnName(piston.turn.load()),
+                onOff(piston.light.load())
             )
         );
         output.success(

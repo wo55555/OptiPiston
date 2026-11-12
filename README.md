@@ -78,6 +78,8 @@ Download `OptiPiston-mc<line>-windows-x64.zip` for your line (for example `OptiP
 | `/optipiston piston duration <ticks>` | Set the animation length, from `2` to `4` game ticks.                        |
 | `/optipiston piston turn diagonal`    | A block pushed again mid-push moves diagonally.                              |
 | `/optipiston piston turn corner`      | A block pushed again mid-push finishes its first push, then turns (default). |
+| `/optipiston piston light on`         | Light a pushed block like the block it carries (default).                    |
+| `/optipiston piston light off`        | Leave a pushed block's light to the game.                                    |
 | `/optipiston speed <value>`           | Set world speed, from `0.01` to `100`.                                       |
 | `/optipiston speed next`              | Switch to the next world speed preset.                                       |
 | `/optipiston speed prev`              | Switch to the previous world speed preset.                                   |
@@ -96,7 +98,8 @@ The configuration lives at `mods/OptiPiston/config/config.json` and is kept acro
     "piston": {
         "enabled": true,
         "durationTicks": 4.0,
-        "turn": "Corner"
+        "turn": "Corner",
+        "light": true
     },
     "worldSpeed": {
         "presets": [0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 4.0, 10.0, 20.0, 50.0, 100.0],
@@ -115,6 +118,7 @@ The configuration lives at `mods/OptiPiston/config/config.json` and is kept acro
 | `piston.enabled`       | Turn piston animation on or off.                               |
 | `piston.durationTicks` | Animation length in game ticks, from `2` to `4`.               |
 | `piston.turn`          | Path of a block pushed again mid-push: `Diagonal` or `Corner`. |
+| `piston.light`         | Light a pushed block like the block it carries.                |
 | `worldSpeed.presets`   | Speeds cycled by `speed next` / `speed prev`.                  |
 | `worldSpeed.audio`     | Scale sound playback with world speed.                         |
 | `worldSpeed.particles` | Scale particles with world speed.                              |

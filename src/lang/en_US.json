@@ -8,7 +8,8 @@
                 "enabled": "Piston animation: {}",
                 "duration": "Piston animation duration: {}gt",
                 "durationRange": "Duration must be between {} and {} ticks",
-                "turn": "Blocks pushed again mid-push: {}"
+                "turn": "Blocks pushed again mid-push: {}",
+                "light": "Pushed block light fix: {}"
             },
             "turn": {
                 "diagonal": "move diagonally",
@@ -20,7 +21,7 @@
                 "blocked": "Not applied: {}"
             },
             "status": {
-                "piston": "Piston animation {}, duration {}gt, blocks pushed again mid-push {}",
+                "piston": "Piston animation {}, duration {}gt, blocks pushed again mid-push {}, light fix {}",
                 "world": "World speed requested {}x, applied {}x ({})",
                 "active": "active"
             }

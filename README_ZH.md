@@ -70,18 +70,18 @@ lip install github.com/wo55555/OptiPiston#client_mc26_20@<version>
 
 ## 命令
 
-| 命令                                  | 说明                                           |
-| ------------------------------------- | ---------------------------------------------- |
-| `/optipiston status`                  | 显示活塞动画状态，以及请求/实际世界速度。      |
-| `/optipiston piston on`               | 开启活塞动画。                                 |
-| `/optipiston piston off`              | 关闭活塞动画。                                 |
-| `/optipiston piston duration <ticks>` | 设置动画时长，范围 `2` 到 `4` 游戏刻。         |
-| `/optipiston piston turn diagonal`    | 推动中被再次推动的方块斜向移动（默认）。       |
-| `/optipiston piston turn corner`      | 推动中被再次推动的方块先加速到位，再直角拐弯。 |
-| `/optipiston speed <value>`           | 设置世界速度，范围 `0.01` 到 `100`。           |
-| `/optipiston speed next`              | 切换到下一个世界速度预设。                     |
-| `/optipiston speed prev`              | 切换到上一个世界速度预设。                     |
-| `/optipiston speed reset`             | 恢复正常速度（`1x`）。                         |
+| 命令                                  | 说明                                                   |
+| ------------------------------------- | ------------------------------------------------------ |
+| `/optipiston status`                  | 显示活塞动画状态，以及请求/实际世界速度。              |
+| `/optipiston piston on`               | 开启活塞动画。                                         |
+| `/optipiston piston off`              | 关闭活塞动画。                                         |
+| `/optipiston piston duration <ticks>` | 设置动画时长，范围 `2` 到 `4` 游戏刻。                 |
+| `/optipiston piston turn diagonal`    | 推动中被再次推动的方块斜向移动。                       |
+| `/optipiston piston turn corner`      | 推动中被再次推动的方块先加速到位，再直角拐弯（默认）。 |
+| `/optipiston speed <value>`           | 设置世界速度，范围 `0.01` 到 `100`。                   |
+| `/optipiston speed next`              | 切换到下一个世界速度预设。                             |
+| `/optipiston speed prev`              | 切换到上一个世界速度预设。                             |
+| `/optipiston speed reset`             | 恢复正常速度（`1x`）。                                 |
 
 活塞相关设置会写入配置文件。选择 `Corner` 时，方块在第一次推动结束前被另一个活塞推动，会先加速完成第一次推动，再直角拐弯，落位时间不变；同一轴向上的推动保持原样。世界变速仅在本地世界、没有其他玩家连接且没有其他模组驱动时钟时生效；未生效时 `/optipiston status` 会显示原因。
 
@@ -96,7 +96,7 @@ lip install github.com/wo55555/OptiPiston#client_mc26_20@<version>
     "piston": {
         "enabled": true,
         "durationTicks": 4.0,
-        "turn": "Diagonal"
+        "turn": "Corner"
     },
     "worldSpeed": {
         "presets": [0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 4.0, 10.0, 20.0, 50.0, 100.0],

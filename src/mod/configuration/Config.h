@@ -10,7 +10,7 @@ namespace optipiston::configuration {
 struct PistonConfig {
     bool            enabled       = true;
     float           durationTicks = 4.0f;
-    core::TurnStyle turn          = core::TurnStyle::Diagonal;
+    core::TurnStyle turn          = core::TurnStyle::Corner;
 };
 
 struct WorldSpeedConfig {

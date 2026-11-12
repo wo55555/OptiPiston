@@ -16,7 +16,7 @@ enum class TurnStyle : uint8_t {
 struct PistonSettings {
     std::atomic_bool       enabled{true};
     std::atomic<float>     durationTicks{4.0f};
-    std::atomic<TurnStyle> turn{TurnStyle::Diagonal};
+    std::atomic<TurnStyle> turn{TurnStyle::Corner};
 };
 
 [[nodiscard]] PistonSettings& pistonSettings() noexcept;

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-11-13
+
+> Prerelease for every Minecraft line (26.10, 26.20, 26.30, 26.40, 26.50, 26.60). Install the variant for your line, for example `lip install github.com/wo55555/OptiPiston#client_mc26_50@0.3.2`. The configuration gains `piston.redirectType` and `piston.movingBlockLighting`; existing files keep working and get the defaults. The C API v1 is unchanged. The new behaviour has been tested in game on 26.30 and 26.50; the other lines build and pass unit tests.
+
 ### Added
 
 - A `piston.redirectType` option and `/optipiston piston redirect diagonal|corner` command for a block that another piston pushes before its first push has finished. `Corner` (default) speeds the block up to finish its first push, then turns at a right angle. `Diagonal` plays both pushes at once, so the block cuts the corner. It lands at the same time either way.
@@ -129,7 +133,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Singleplayer world speed with optional audio and particle scaling.
 - `/optipiston` client command and a C API for Playback's replay clock.
 
-[Unreleased]: https://github.com/wo55555/OptiPiston/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/wo55555/OptiPiston/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/wo55555/OptiPiston/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/wo55555/OptiPiston/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/wo55555/OptiPiston/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/wo55555/OptiPiston/compare/v0.1.4...v0.2.0

@@ -2,7 +2,7 @@ add_rules("mode.debug", "mode.release")
 
 add_repositories("levimc-repo https://github.com/LiteLDev/xmake-repo.git")
 
-local optipiston_version = "0.3.1"
+local optipiston_version = "0.3.2"
 
 -- One DLL per release line; code is exposed to the adapter as OPTIPISTON_MC.
 local mc_lines = {

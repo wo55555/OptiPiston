@@ -56,24 +56,55 @@ TEST_CASE("fractional durations set the visual length") {
 
 TEST_CASE("a corner pose finishes the earlier tail before the new push, landing on time") {
     auto const next = makeSegment(10, 0.0f, 1.0f, 4.0f);
-    auto       pose = cornerPose(next, 0.5f, 10.0);
+    auto const legs = std::vector<float>{0.5f};
+    auto       pose = cornerPose(next, legs, 10.0);
     CHECK(pose.tailLeft == doctest::Approx(1.0f));
     CHECK(pose.value == doctest::Approx(0.0f));
-    pose = cornerPose(next, 0.5f, 11.0);
+    pose = cornerPose(next, legs, 11.0);
     CHECK(pose.tailLeft == doctest::Approx(0.25f));
     CHECK(pose.value == doctest::Approx(0.0f));
-    pose = cornerPose(next, 0.5f, 12.0);
+    pose = cornerPose(next, legs, 12.0);
     CHECK(pose.tailLeft == doctest::Approx(0.0f));
     CHECK(pose.value == doctest::Approx(0.25f));
-    pose = cornerPose(next, 0.5f, 14.0);
+    pose = cornerPose(next, legs, 14.0);
     CHECK(pose.tailLeft == doctest::Approx(0.0f));
     CHECK(pose.value == doctest::Approx(1.0f));
+}
+
+TEST_CASE("a corner pose walks every owed push before the new one, landing on time") {
+    auto const next = makeSegment(10, 0.0f, 1.0f, 4.0f);
+    auto const legs = std::vector<float>{0.5f, 0.5f};
+    auto       pose = cornerPose(next, legs, 10.0);
+    CHECK(pose.tailLeft == doctest::Approx(1.0f));
+    CHECK(pose.value == doctest::Approx(0.0f));
+    pose = cornerPose(next, legs, 11.0);
+    CHECK(pose.tailLeft == doctest::Approx(1.0f));
+    CHECK(pose.value == doctest::Approx(0.0f));
+    pose = cornerPose(next, legs, 12.0);
+    CHECK(pose.tailLeft == doctest::Approx(0.0f));
+    CHECK(pose.value == doctest::Approx(0.0f));
+    pose = cornerPose(next, legs, 13.0);
+    CHECK(pose.tailLeft == doctest::Approx(0.0f));
+    CHECK(pose.value == doctest::Approx(0.5f));
+    pose = cornerPose(next, legs, 14.0);
+    CHECK(pose.tailLeft == doctest::Approx(0.0f));
+    CHECK(pose.value == doctest::Approx(1.0f));
+}
+
+TEST_CASE("corner legs drop pushes that have already finished") {
+    auto const legs = std::vector<CornerLeg>{
+        {{0, 0.0f, 1.0f, 4.0, 4.0}, {1, 0, 0}},
+        {{0, 0.0f, 1.0f, 2.0, 4.0}, {0, 1, 0}},
+    };
+    auto const left = cornerLegsLeft(legs, 3.0);
+    REQUIRE(left.size() == 1);
+    CHECK(left[0] == doctest::Approx(0.25f));
 }
 
 TEST_CASE("a corner pose with no tail left is the plain segment") {
     auto const next = makeSegment(0, 1.0f, 0.0f, 2.0f);
     for (double t : {0.0, 0.5, 1.0, 1.5, 2.0, 3.0}) {
-        auto const pose = cornerPose(next, 0.0f, t);
+        auto const pose = cornerPose(next, std::vector<float>{}, t);
         CHECK(pose.tailLeft == doctest::Approx(0.0f));
         CHECK(pose.value == doctest::Approx(segmentValue(next, t)));
     }

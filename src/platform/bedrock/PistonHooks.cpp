@@ -370,6 +370,8 @@ struct PushCell {
     ::BlockPos                         pistonPos;
     ActionVisual                       visual; // copied, so a successor can still replay its tail after the action ends
     std::optional<CarryVisual>         carry;
+    // Pushes the block still owes, newest first: its own carried tail, then the tail that one carried.
+    std::vector<ActionVisual>           carried;
     bool                               corner{}; // the carried tail finishes before the block turns
     core::PushTimeline                 timeline;
     std::shared_ptr<std::string const> wrapped; // block name, shared with the published views
@@ -394,8 +396,9 @@ using PistonMap = std::unordered_map<::BlockPos, PistonVisual, BlockPosHash>;
 
 // A cell replaced mid-push before its action's sibling cell committed; the sibling takes the tail over.
 struct ReplacedTail {
-    uint64_t    action{}; // the newer action
-    CarryVisual carry;
+    uint64_t                  action{}; // the newer action
+    CarryVisual               carry;
+    std::vector<ActionVisual> carried; // the tail's own owed pushes, newest first
 };
 using TailMap   = std::unordered_map<::BlockPos, ReplacedTail, BlockPosHash>;
 using ActionMap = std::unordered_map<uint64_t, ActionVisual>;
@@ -4075,17 +4078,32 @@ float armValue(PistonVisual const& visual, double time) {
     if (state != PushState::Animating && state != PushState::Landing) return ::Vec3{0.0f, 0.0f, 0.0f};
     auto const& next = rec.visual.segment;
     if (rec.carry && rec.corner && time > static_cast<double>(next.startTick)) {
-        auto const start  = static_cast<double>(next.startTick);
-        auto const tail   = actionOffset(rec.carry->visual, start);
-        auto const left   = std::abs(segmentValue(rec.carry->visual.segment, start) - rec.carry->visual.segment.to);
-        auto const pose   = core::cornerPose(next, left, time);
-        auto const rel    = pose.value - next.to;
-        auto const facing = rec.visual.facing;
-        return ::Vec3{
-            static_cast<float>(facing.x) * rel + tail.x * pose.tailLeft,
-            static_cast<float>(facing.y) * rel + tail.y * pose.tailLeft,
-            static_cast<float>(facing.z) * rel + tail.z * pose.tailLeft
+        auto const start = static_cast<double>(next.startTick);
+        // The block finishes every push it still owes, newest first, before the new one starts.
+        std::vector<core::CornerLeg> legs{
+            {rec.carry->visual.segment,
+             {rec.carry->visual.facing.x, rec.carry->visual.facing.y, rec.carry->visual.facing.z}}
         };
+        for (auto const& owed : rec.carried)
+            legs.push_back({
+                owed.segment,
+                {owed.facing.x, owed.facing.y, owed.facing.z}
+            });
+        auto const left = core::cornerLegsLeft(legs, start);
+        auto const pose = core::cornerPose(next, left, time);
+        auto const rel  = pose.value - next.to;
+        auto       out  = ::Vec3{
+            static_cast<float>(rec.visual.facing.x) * rel,
+            static_cast<float>(rec.visual.facing.y) * rel,
+            static_cast<float>(rec.visual.facing.z) * rel
+        };
+        if (pose.tailLeft > 0.0f) {
+            auto const& leg  = legs[legs.size() - left.size()];
+            out.x           += static_cast<float>(leg.facing[0]) * pose.tailLeft;
+            out.y           += static_cast<float>(leg.facing[1]) * pose.tailLeft;
+            out.z           += static_cast<float>(leg.facing[2]) * pose.tailLeft;
+        }
+        return out;
     }
     auto offset = actionOffset(rec.visual, time);
     if (rec.carry) {
@@ -5031,7 +5049,9 @@ void commitProxyLocked(NewProxy& made, Graveyard& drop) {
         auto const old = gCells.find(source);
         // A newer action's record there holds a block that entered after this one left.
         if (old != gCells.end() && old->second.action < made.action && !old->second.timeline.superseded()) {
-            rec.carry = CarryVisual{old->second.action, old->second.visual};
+            rec.carry   = CarryVisual{old->second.action, old->second.visual};
+            rec.carried = old->second.carried;
+            if (old->second.carry) rec.carried.insert(rec.carried.begin(), old->second.carry->visual);
             pure      = false;
             old->second.timeline.supersededBy(made.action);
             takeProxy(old->second, drop);
@@ -5040,7 +5060,8 @@ void commitProxyLocked(NewProxy& made, Graveyard& drop) {
                    tail != gReplacedTails.end() && tail->second.action >= made.action
                    && tail->second.carry.action < made.action) {
             // A sibling of this action, or a newer push into the cell, already replaced the cell the block comes from.
-            rec.carry = tail->second.carry;
+            rec.carry   = tail->second.carry;
+            rec.carried = tail->second.carried;
             pure      = false;
             OPTIPISTON_PROBE_DO(probeTailCarried(made.cell, source, tail->second.carry.action, made.action);)
             gReplacedTails.erase(tail);
@@ -5065,8 +5086,14 @@ void commitProxyLocked(NewProxy& made, Graveyard& drop) {
             });
             gReplacedTails[made.cell] = ReplacedTail{
                 made.action,
-                CarryVisual{replaced->second.action, replaced->second.visual}
+                CarryVisual{replaced->second.action, replaced->second.visual},
+                replaced->second.carried
             };
+            if (replaced->second.carry)
+                gReplacedTails[made.cell].carried.insert(
+                    gReplacedTails[made.cell].carried.begin(),
+                    replaced->second.carry->visual
+                );
         }
         if (replaced->second.timeline.state() != PushState::Done) replaced->second.timeline.supersededBy(made.action);
         takeProxy(replaced->second, drop);

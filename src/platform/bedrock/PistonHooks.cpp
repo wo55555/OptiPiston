@@ -142,7 +142,7 @@ using core::Segment;
 std::atomic_bool gInstalled{false};
 
 bool smoothPistonRenderEnabled() { return core::pistonSettings().enabled.load(std::memory_order_relaxed); }
-bool pushedLightEnabled() { return core::pistonSettings().light.load(std::memory_order_relaxed); }
+bool movingBlockLightingEnabled() { return core::pistonSettings().movingBlockLighting.load(std::memory_order_relaxed); }
 
 struct BlockPosHash {
     [[nodiscard]] size_t operator()(::BlockPos const& pos) const noexcept {
@@ -5049,7 +5049,7 @@ void commitProxyLocked(NewProxy& made, Graveyard& drop) {
     if (rec.carry) {
         auto const& was = rec.carry->visual.facing;
         auto const& now = made.visual.facing;
-        rec.corner      = core::pistonSettings().turn.load(std::memory_order_relaxed) == core::TurnStyle::Corner
+        rec.corner = core::pistonSettings().redirectType.load(std::memory_order_relaxed) == core::RedirectType::Corner
                   && was.x * now.x + was.y * now.y + was.z * now.z == 0;
     }
     if (source != made.pistonPos && rec.wrapped) moveArmLocked(source, made.cell, *rec.wrapped);
@@ -6870,7 +6870,8 @@ LL_TYPE_STATIC_HOOK(
     }
 #endif
     origin(screenContext, source, light, blockLightColor, a, ignoreLighting, lightTexture, uvScale, uvAnim);
-    if (tProxyLightFix.active && !ignoreLighting && pushedLightEnabled()) fixTileLightIntensity(screenContext, source);
+    if (tProxyLightFix.active && !ignoreLighting && movingBlockLightingEnabled())
+        fixTileLightIntensity(screenContext, source);
 }
 
 using ll::memory_literals::operator""_sig;
@@ -6939,7 +6940,7 @@ LL_TYPE_INSTANCE_HOOK(
     ::mce::Color,
     ::glm::vec2 const& uv
 ) {
-    if (!tProxyLightFix.active || !pushedLightEnabled()) return origin(uv);
+    if (!tProxyLightFix.active || !movingBlockLightingEnabled()) return origin(uv);
     // Just short of the last texel: the lookup snaps anything at or past it back by one texel.
     constexpr float kTopTexel = 0.96874f;
     auto const      scaled    = uv * (16.0f / 15.0f);
@@ -7037,7 +7038,7 @@ std::atomic<GetElementFn> gGetElementOrigin[kStorageKinds]{};
 template <std::size_t I>
 ::Block const& carriedLightGetElement(void const* storage, std::uint16_t index) {
     auto const& block = gGetElementOrigin[I].load(std::memory_order_relaxed)(storage, index);
-    if (&block != gMovingBlock.load(std::memory_order_relaxed) || !pushedLightEnabled()) return block;
+    if (&block != gMovingBlock.load(std::memory_order_relaxed) || !movingBlockLightingEnabled()) return block;
     ::Block const* carried = nullptr;
     if (auto const* relighter = tClientRelighter) carried = carriedLightBlock(*relighter, storage, index);
     else if (std::ranges::find(gVibrantLightScans, reinterpret_cast<std::uintptr_t>(LL_RETURN_ADDRESS))
@@ -7095,7 +7096,7 @@ LL_TYPE_INSTANCE_HOOK(
     std::vector<::SubChunkLightUpdate> const& alteredBlockList,
     std::vector<::BlockPos>&                  brightnessChangedList
 ) {
-    if (!levelChunk.mLevel.isClientSide() || !pushedLightEnabled()) {
+    if (!levelChunk.mLevel.isClientSide() || !movingBlockLightingEnabled()) {
         origin(levelChunk, alteredBlockList, brightnessChangedList);
         return;
     }
@@ -7109,7 +7110,7 @@ LL_TYPE_INSTANCE_HOOK(
 
 // The client learns what a moving block carries from its data, after the cell was already relit as a moving block.
 void noteCarriedLight(::MovingBlockActor const& moving, ::BlockSource& region) {
-    if (!pushedLightEnabled()) {
+    if (!movingBlockLightingEnabled()) {
         std::lock_guard const guard(gCarriedLightMutex);
         gCarriedLight.clear();
         return;

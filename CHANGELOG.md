@@ -9,8 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- A `piston.turn` option and `/optipiston piston turn diagonal|corner` command for a block that another piston pushes before its first push has finished. `Corner` (default) speeds the block up to finish its first push, then turns at a right angle. `Diagonal` plays both pushes at once, so the block cuts the corner. It lands at the same time either way.
-- A `piston.light` option and `/optipiston piston light on|off` command for the pushed-block light fixes below, on by default.
+- A `piston.redirectType` option and `/optipiston piston redirect diagonal|corner` command for a block that another piston pushes before its first push has finished. `Corner` (default) speeds the block up to finish its first push, then turns at a right angle. `Diagonal` plays both pushes at once, so the block cuts the corner. It lands at the same time either way.
+- A `piston.movingBlockLighting` option and `/optipiston piston lighting on|off` command for the moving block light fixes below, on by default.
 
 ### Fixed
 

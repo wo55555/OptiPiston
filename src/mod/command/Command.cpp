@@ -46,19 +46,19 @@ void setPistonEnabled(CommandOutput& output, bool enabled) {
     output.success("optipiston.command.piston.enabled"_tr(onOff(enabled)));
 }
 
-std::string turnName(core::TurnStyle turn) {
-    return turn == core::TurnStyle::Corner ? "optipiston.command.turn.corner"_tr()
-                                           : "optipiston.command.turn.diagonal"_tr();
+std::string redirectName(core::RedirectType type) {
+    return type == core::RedirectType::Corner ? "optipiston.command.redirect.corner"_tr()
+                                              : "optipiston.command.redirect.diagonal"_tr();
 }
 
-void setTurn(CommandOutput& output, core::TurnStyle turn) {
-    OptiPiston::getInstance().updateConfig([turn](auto& config) { config.piston.turn = turn; });
-    output.success("optipiston.command.piston.turn"_tr(turnName(turn)));
+void setRedirectType(CommandOutput& output, core::RedirectType type) {
+    OptiPiston::getInstance().updateConfig([type](auto& config) { config.piston.redirectType = type; });
+    output.success("optipiston.command.piston.redirect"_tr(redirectName(type)));
 }
 
-void setLight(CommandOutput& output, bool light) {
-    OptiPiston::getInstance().updateConfig([light](auto& config) { config.piston.light = light; });
-    output.success("optipiston.command.piston.light"_tr(onOff(light)));
+void setMovingBlockLighting(CommandOutput& output, bool enabled) {
+    OptiPiston::getInstance().updateConfig([enabled](auto& config) { config.piston.movingBlockLighting = enabled; });
+    output.success("optipiston.command.piston.lighting"_tr(onOff(enabled)));
 }
 
 } // namespace
@@ -91,18 +91,28 @@ void registerCommands(std::string const& name) {
         });
     command.overload()
         .text("piston")
-        .text("turn")
+        .text("redirect")
         .text("diagonal")
-        .execute([](CommandOrigin const&, CommandOutput& output) { setTurn(output, core::TurnStyle::Diagonal); });
-    command.overload().text("piston").text("turn").text("corner").execute(
-        [](CommandOrigin const&, CommandOutput& output) { setTurn(output, core::TurnStyle::Corner); }
-    );
-    command.overload().text("piston").text("light").text("on").execute([](CommandOrigin const&, CommandOutput& output) {
-        setLight(output, true);
-    });
-    command.overload().text("piston").text("light").text("off").execute(
-        [](CommandOrigin const&, CommandOutput& output) { setLight(output, false); }
-    );
+        .execute([](CommandOrigin const&, CommandOutput& output) {
+            setRedirectType(output, core::RedirectType::Diagonal);
+        });
+    command.overload()
+        .text("piston")
+        .text("redirect")
+        .text("corner")
+        .execute([](CommandOrigin const&, CommandOutput& output) {
+            setRedirectType(output, core::RedirectType::Corner);
+        });
+    command.overload()
+        .text("piston")
+        .text("lighting")
+        .text("on")
+        .execute([](CommandOrigin const&, CommandOutput& output) { setMovingBlockLighting(output, true); });
+    command.overload()
+        .text("piston")
+        .text("lighting")
+        .text("off")
+        .execute([](CommandOrigin const&, CommandOutput& output) { setMovingBlockLighting(output, false); });
 
     command.overload<SpeedParams>().text("speed").required("value").execute(
         [](CommandOrigin const&, CommandOutput& output, SpeedParams const& params) {
@@ -133,8 +143,8 @@ void registerCommands(std::string const& name) {
             "optipiston.command.status.piston"_tr(
                 onOff(piston.enabled.load()),
                 piston.durationTicks.load(),
-                turnName(piston.turn.load()),
-                onOff(piston.light.load())
+                redirectName(piston.redirectType.load()),
+                onOff(piston.movingBlockLighting.load())
             )
         );
         output.success(

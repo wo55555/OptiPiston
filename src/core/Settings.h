@@ -7,18 +7,18 @@
 namespace optipiston::core {
 
 // Path of a block pushed again before its earlier push finished.
-enum class TurnStyle : uint8_t {
+enum class RedirectType : uint8_t {
     Diagonal, // both pushes play at once
     Corner    // the earlier push finishes first, then the block turns
 };
 
 // Values the render and tick hooks read; written by commands and the external API.
 struct PistonSettings {
-    std::atomic_bool       enabled{true};
-    std::atomic<float>     durationTicks{4.0f};
-    std::atomic<TurnStyle> turn{TurnStyle::Corner};
+    std::atomic_bool          enabled{true};
+    std::atomic<float>        durationTicks{4.0f};
+    std::atomic<RedirectType> redirectType{RedirectType::Corner};
     // A pushed block is lit like the landed one, and blocks and gives light like the block it carries.
-    std::atomic_bool light{true};
+    std::atomic_bool movingBlockLighting{true};
 };
 
 [[nodiscard]] PistonSettings& pistonSettings() noexcept;

@@ -26,6 +26,7 @@
 #include "ll/api/memory/Memory.h"
 #include "ll/api/mod/NativeMod.h"
 #include "ll/api/service/TargetedBedrock.h"
+#include "ll/api/utils/SystemUtils.h"
 
 #include "mc/client/game/ClientInstance.h"
 #include "mc/client/network/ClientNetworkHandler.h"
@@ -6934,10 +6935,15 @@ LL_TYPE_INSTANCE_HOOK(
 
 // 26.60 does not export SubChunkRelighter::relightSubChunk or MovingBlockActor::_onUpdatePacket.
 #if OPTIPISTON_MC < 2660
+struct CarriedLight {
+    ::Block const*                    block;
+    ::SubChunkStorage<::Block> const* storage; // the block storage of the cell's subchunk when noted
+};
+
 // Client cells whose moving block carries a known block.
-std::mutex                                                   gCarriedLightMutex;
-std::unordered_map<::BlockPos, ::Block const*, BlockPosHash> gCarriedLight; // guarded by gCarriedLightMutex
-std::atomic<::Block const*>                                  gMovingBlock{nullptr};
+std::mutex                                                 gCarriedLightMutex;
+std::unordered_map<::BlockPos, CarriedLight, BlockPosHash> gCarriedLight; // guarded by gCarriedLightMutex
+std::atomic<::Block const*>                                gMovingBlock{nullptr};
 // The relighter of the client subchunk this thread is relighting.
 thread_local ::SubChunkRelighter const* tClientRelighter = nullptr;
 
@@ -6958,9 +6964,47 @@ thread_local ::SubChunkRelighter const* tClientRelighter = nullptr;
                 };
                 std::lock_guard const guard(gCarriedLightMutex);
                 auto const            it = gCarriedLight.find(pos);
-                return it == gCarriedLight.end() ? nullptr : it->second;
+                return it == gCarriedLight.end() ? nullptr : it->second.block;
             }
         }
+    }
+    return nullptr;
+}
+
+// Vibrant Visuals lights blocks from its own scans, each reading every cell of a subchunk; these are where each scan's
+// block read returns in the game.
+#if OPTIPISTON_MC == 2610
+constexpr std::array<std::uintptr_t, 1> kVibrantLightScans{0x20FE274};
+#elif OPTIPISTON_MC == 2620
+constexpr std::array<std::uintptr_t, 2> kVibrantLightScans{0x21B7F5B, 0x21B8E7A};
+#elif OPTIPISTON_MC == 2632
+constexpr std::array<std::uintptr_t, 2> kVibrantLightScans{0x4285FB4, 0x4288333};
+#elif OPTIPISTON_MC == 2640
+constexpr std::array<std::uintptr_t, 2> kVibrantLightScans{0x596A734, 0x596CC33};
+#else
+constexpr std::array<std::uintptr_t, 4> kVibrantLightScans{0x46F3234, 0x46F5544, 0x46F5734, 0x46F5924};
+#endif
+// Absolute addresses, all zero unless every site returns from a call in this game.
+std::array<std::uintptr_t, kVibrantLightScans.size()> gVibrantLightScans{};
+
+void resolveVibrantLightScans() {
+    auto const game = ll::sys_utils::getImageRange();
+    for (std::size_t i = 0; i < kVibrantLightScans.size(); ++i) {
+        auto const  rva = kVibrantLightScans[i];
+        auto const* ra  = reinterpret_cast<std::uint8_t const*>(game.data()) + rva;
+        if (rva < 6 || rva >= game.size() || (!(ra[-6] == 0xFF && ra[-5] == 0x15) && ra[-5] != 0xE8)) {
+            gVibrantLightScans.fill(0);
+            return;
+        }
+        gVibrantLightScans[i] = reinterpret_cast<std::uintptr_t>(ra);
+    }
+}
+
+::Block const* vibrantCarriedLightBlock(void const* storage, std::uint16_t index) {
+    std::lock_guard const guard(gCarriedLightMutex);
+    for (auto const& [pos, light] : gCarriedLight) {
+        if (light.storage == storage && (((pos.x & 15) << 8) | ((pos.z & 15) << 4) | (pos.y & 15)) == index)
+            return light.block;
     }
     return nullptr;
 }
@@ -6974,13 +7018,16 @@ std::mutex                gStoragePatchMutex;
 void**                    gPatchedSlot[kStorageKinds]{}; // guarded by gStoragePatchMutex
 std::atomic<GetElementFn> gGetElementOrigin[kStorageKinds]{};
 
-// Outside client relighting this costs one thread-local read.
+// Reads of other blocks cost one comparison.
 template <std::size_t I>
 ::Block const& carriedLightGetElement(void const* storage, std::uint16_t index) {
-    auto const& block     = gGetElementOrigin[I].load(std::memory_order_relaxed)(storage, index);
-    auto const* relighter = tClientRelighter;
-    if (!relighter || &block != gMovingBlock.load(std::memory_order_relaxed)) return block;
-    auto const* carried = carriedLightBlock(*relighter, storage, index);
+    auto const& block = gGetElementOrigin[I].load(std::memory_order_relaxed)(storage, index);
+    if (&block != gMovingBlock.load(std::memory_order_relaxed)) return block;
+    ::Block const* carried = nullptr;
+    if (auto const* relighter = tClientRelighter) carried = carriedLightBlock(*relighter, storage, index);
+    else if (std::ranges::find(gVibrantLightScans, reinterpret_cast<std::uintptr_t>(LL_RETURN_ADDRESS))
+             != gVibrantLightScans.end())
+        carried = vibrantCarriedLightBlock(storage, index);
     return carried ? *carried : block;
 }
 
@@ -7043,16 +7090,25 @@ void noteCarriedLight(::MovingBlockActor const& moving, ::BlockSource& region) {
     gMovingBlock.store(&here, std::memory_order_relaxed);
     auto const& carried = carriedMoving(moving);
     auto const* block   = carriesBlock(carried) ? wrappedBlockOf(carried) : nullptr;
+    auto* const                       chunk   = region.getChunkAt(pos);
+    ::SubChunkStorage<::Block> const* storage = nullptr;
+    if (chunk) {
+        for (auto const& subChunk : chunk->mSubChunks.get()) {
+            if (subChunk.mAbsoluteIndex != (pos.y >> 4)) continue;
+            storage = subChunk.mBlocksReadPtr[0];
+            break;
+        }
+    }
+    if (storage) patchStorage(*storage);
     {
         std::lock_guard const guard(gCarriedLightMutex);
         // Cells no longer holding a moving block are dropped here, the next time any moving block is noted.
         std::erase_if(gCarriedLight, [&](auto const& entry) { return &region.getBlock(entry.first) != &here; });
-        if (block) gCarriedLight[pos] = block;
+        if (block) gCarriedLight[pos] = {block, storage};
         else gCarriedLight.erase(pos);
     }
     if (!block) return;
-    if (auto* const chunk = region.getChunkAt(pos))
-        chunk->_lightingCallbacks(::ChunkBlockPos{pos, region.getMinHeight()}, here, *block, &region);
+    if (chunk) chunk->_lightingCallbacks(::ChunkBlockPos{pos, region.getMinHeight()}, here, *block, &region);
 }
 
 LL_TYPE_INSTANCE_HOOK(
@@ -7077,6 +7133,7 @@ void removeCarriedLight(bool& relightInstalled, bool& noteInstalled) {
 }
 
 void installCarriedLight(bool& relightInstalled, bool& noteInstalled) {
+    resolveVibrantLightScans();
     if (!installHook<OptiPistonClientRelightHook>(relightInstalled)
         || !installHook<OptiPistonCarriedLightHook>(noteInstalled))
         removeCarriedLight(relightInstalled, noteInstalled);

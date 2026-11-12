@@ -29,6 +29,7 @@
 #include "ll/api/utils/SystemUtils.h"
 
 #include "mc/client/game/ClientInstance.h"
+#include "mc/client/gui/screens/ScreenContext.h"
 #include "mc/client/network/ClientNetworkHandler.h"
 #include "mc/client/network/LegacyClientNetworkHandler.h"
 #include "mc/client/player/LocalPlayer.h"
@@ -53,11 +54,15 @@
 #include "mc/deps/core/math/Color.h"
 #include "mc/deps/core/math/Vec3.h"
 #include "mc/deps/core/renderer/RenderMaterialInfo.h"
+#include "mc/deps/minecraft_renderer/constantbuffers/GlobalConstantBuffers.h"
 #include "mc/deps/minecraft_renderer/framebuilder/dragon/RenderMetadata.h"
 #include "mc/deps/minecraft_renderer/renderer/MaterialPtr.h"
 #include "mc/deps/minecraft_renderer/renderer/RenderMaterial.h"
 #include "mc/deps/minecraft_renderer/resources/ClientTexture.h"
 #include "mc/deps/nbt/CompoundTag.h"
+#if OPTIPISTON_MC >= 2651
+#include "mc/deps/renderer/hal/base/ShaderConstantBase.h"
+#endif
 #include "mc/network/NetworkIdentifier.h"
 #include "mc/network/packet/BlockActorDataPacket.h"
 #include "mc/network/packet/UpdateSubChunkBlocksChangedInfo.h"
@@ -6781,15 +6786,24 @@ void fixTileLightIntensity(::ScreenContext& screenContext, ::BlockSource& source
         sky    += w * static_cast<float>(light & 0xFF);
     }
     if (weight == 0) return;
-    // MeshContext::constantBuffers at +32, its entityConstantBuffer.TILE_LIGHT_INTENSITY at +224; that constant keeps
-    // its value pointer at +64 and its dirty flag at +49.
-    auto* const buffers  = *reinterpret_cast<std::byte* const*>(reinterpret_cast<std::byte*>(&screenContext) + 32);
-    auto* const constant = *reinterpret_cast<std::byte**>(buffers + 224);
-    auto* const value    = *reinterpret_cast<float**>(constant + 64);
+#if OPTIPISTON_MC == 2610
+    // GlobalConstantBuffers::entityConstantBuffer.TILE_LIGHT_INTENSITY
+    auto* const constant =
+        *reinterpret_cast<std::byte* const*>(reinterpret_cast<std::byte*>(&screenContext.constantBuffers) + 224);
+#else
+    auto* const constant =
+        reinterpret_cast<std::byte*>(screenContext.constantBuffers.entityConstantBuffer->TILE_LIGHT_INTENSITY);
+#endif
+    // ShaderConstantWithData keeps its value pointer here.
+    auto* const value = *reinterpret_cast<float**>(constant + 64);
     // Level/15, as the chunk shader reads it.
-    value[0]     = block / (weight * 15.0f);
-    value[1]     = sky / (weight * 15.0f);
-    constant[49] = std::byte{1};
+    value[0] = block / (weight * 15.0f);
+    value[1] = sky / (weight * 15.0f);
+#if OPTIPISTON_MC >= 2651
+    reinterpret_cast<::mce::ShaderConstantBase*>(constant)->dirty = true;
+#else
+    constant[49] = std::byte{1}; // ShaderConstantBase::dirty
+#endif
 }
 
 using ShaderLightFn = void (*)(

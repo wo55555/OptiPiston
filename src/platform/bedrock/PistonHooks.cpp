@@ -6933,8 +6933,6 @@ LL_TYPE_INSTANCE_HOOK(
 
 // ---- Client world light: a moving block blocks and gives light like the block it carries ----
 
-// 26.60 does not export SubChunkRelighter::relightSubChunk or MovingBlockActor::_onUpdatePacket.
-#if OPTIPISTON_MC < 2660
 struct CarriedLight {
     ::Block const*                    block;
     ::SubChunkStorage<::Block> const* storage; // the block storage of the cell's subchunk when noted
@@ -6981,6 +6979,8 @@ constexpr std::array<std::uintptr_t, 2> kVibrantLightScans{0x21B7F5B, 0x21B8E7A}
 constexpr std::array<std::uintptr_t, 2> kVibrantLightScans{0x4285FB4, 0x4288333};
 #elif OPTIPISTON_MC == 2640
 constexpr std::array<std::uintptr_t, 2> kVibrantLightScans{0x596A734, 0x596CC33};
+#elif OPTIPISTON_MC == 2660
+constexpr std::array<std::uintptr_t, 2> kVibrantLightScans{0x5ADCDE3, 0x5ADFA53};
 #else
 constexpr std::array<std::uintptr_t, 4> kVibrantLightScans{0x46F3234, 0x46F5544, 0x46F5734, 0x46F5924};
 #endif
@@ -7060,11 +7060,21 @@ void unpatchStorages() {
     }
 }
 
+#if OPTIPISTON_MC == 2660
+// SubChunkRelighter::relightSubChunk
+#define OPTIPISTON_RELIGHT_SUBCHUNK                                                                                    \
+    "55 41 57 41 56 41 55 41 54 56 57 53 48 81 EC B8 00 00 00 48 8D AC 24 80 00 00 00 48 C7 45 30 FE FF FF FF 48 89 "  \
+    "4D 00 49 8B 00 49 3B 40 08 0F 84 ?? ?? ?? ?? 4C 89 C7 4C 89 4D D0 48 89 55 C8 48 8B 4A 50 48 8B 01 48 8B 80 E8 "  \
+    "09 00 00"_sig
+#else
+#define OPTIPISTON_RELIGHT_SUBCHUNK &::SubChunkRelighter::relightSubChunk
+#endif
+
 LL_TYPE_INSTANCE_HOOK(
     OptiPistonClientRelightHook,
     ll::memory::HookPriority::Normal,
     ::SubChunkRelighter,
-    &::SubChunkRelighter::relightSubChunk,
+    OPTIPISTON_RELIGHT_SUBCHUNK,
     void,
     ::LevelChunk const&                       levelChunk,
     std::vector<::SubChunkLightUpdate> const& alteredBlockList,
@@ -7111,6 +7121,49 @@ void noteCarriedLight(::MovingBlockActor const& moving, ::BlockSource& region) {
     if (chunk) chunk->_lightingCallbacks(::ChunkBlockPos{pos, region.getMinHeight()}, here, *block, &region);
 }
 
+#if OPTIPISTON_MC == 2660
+// MovingBlockActor keeps BlockActor::_onUpdatePacket here, so its own vtable slot is replaced once one is built.
+constexpr std::size_t kOnUpdatePacketSlot = 19;
+using OnUpdatePacketFn                    = void (*)(::MovingBlockActor*, ::CompoundTag const&, ::BlockSource&);
+std::atomic<OnUpdatePacketFn> gOnUpdatePacketOrigin{nullptr};
+void**                        gOnUpdatePacketSlot = nullptr; // guarded by gStoragePatchMutex
+
+void carriedLightOnUpdatePacket(::MovingBlockActor* self, ::CompoundTag const& data, ::BlockSource& region) {
+    gOnUpdatePacketOrigin.load(std::memory_order_relaxed)(self, data, region);
+    if (region.getLevel().isClientSide()) noteCarriedLight(*self, region);
+}
+
+void unpatchOnUpdatePacket() {
+    std::lock_guard const guard(gStoragePatchMutex);
+    if (auto** const slot = std::exchange(gOnUpdatePacketSlot, nullptr)) {
+        auto* const origin = reinterpret_cast<void*>(gOnUpdatePacketOrigin.load(std::memory_order_relaxed));
+        ll::memory::modify(slot, sizeof(void*), [&] { *slot = origin; });
+    }
+}
+
+LL_TYPE_INSTANCE_HOOK(
+    OptiPistonCarriedLightHook,
+    ll::memory::HookPriority::Normal,
+    ::MovingBlockActor,
+    &::MovingBlockActor::$ctor,
+    void*,
+    ::BlockPos const& pos
+) {
+    auto* const  result = origin(pos);
+    auto** const slot   = *reinterpret_cast<void***>(this) + kOnUpdatePacketSlot;
+    if (*slot != reinterpret_cast<void*>(&carriedLightOnUpdatePacket)) {
+        std::lock_guard const guard(gStoragePatchMutex);
+        if (!gOnUpdatePacketSlot) {
+            gOnUpdatePacketOrigin.store(reinterpret_cast<OnUpdatePacketFn>(*slot), std::memory_order_relaxed);
+            gOnUpdatePacketSlot = slot;
+            ll::memory::modify(slot, sizeof(void*), [&] {
+                *slot = reinterpret_cast<void*>(&carriedLightOnUpdatePacket);
+            });
+        }
+    }
+    return result;
+}
+#else
 LL_TYPE_INSTANCE_HOOK(
     OptiPistonCarriedLightHook,
     ll::memory::HookPriority::Normal,
@@ -7123,10 +7176,14 @@ LL_TYPE_INSTANCE_HOOK(
     origin(data, region);
     if (region.getLevel().isClientSide()) noteCarriedLight(*this, region);
 }
+#endif
 
 void removeCarriedLight(bool& relightInstalled, bool& noteInstalled) {
     removeHook<OptiPistonCarriedLightHook>(noteInstalled);
     removeHook<OptiPistonClientRelightHook>(relightInstalled);
+#if OPTIPISTON_MC == 2660
+    unpatchOnUpdatePacket();
+#endif
     unpatchStorages();
     std::lock_guard const guard(gCarriedLightMutex);
     gCarriedLight.clear();
@@ -7138,7 +7195,6 @@ void installCarriedLight(bool& relightInstalled, bool& noteInstalled) {
         || !installHook<OptiPistonCarriedLightHook>(noteInstalled))
         removeCarriedLight(relightInstalled, noteInstalled);
 }
-#endif
 
 bool gLightFixInstalled[5]{};
 
@@ -7147,15 +7203,11 @@ void installLightFix() {
     (void)installHook<OptiPistonLightColorHook>(gLightFixInstalled[0]);
     if (colorForUVTarget() != 0) (void)installHook<OptiPistonLightUVHook>(gLightFixInstalled[2]);
     (void)installHook<OptiPistonShaderLightHook>(gLightFixInstalled[1]);
-#if OPTIPISTON_MC < 2660
     installCarriedLight(gLightFixInstalled[3], gLightFixInstalled[4]);
-#endif
 }
 
 void removeLightFix() {
-#if OPTIPISTON_MC < 2660
     removeCarriedLight(gLightFixInstalled[3], gLightFixInstalled[4]);
-#endif
     removeHook<OptiPistonShaderLightHook>(gLightFixInstalled[1]);
     removeHook<OptiPistonLightUVHook>(gLightFixInstalled[2]);
     removeHook<OptiPistonLightColorHook>(gLightFixInstalled[0]);

@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - A pushed block no longer looks darker or brighter while it moves than once it lands, with Fancy and Vibrant Visuals graphics alike.
+- While a block is pushed, its cell now blocks and gives off light like the block itself instead of letting all light through and giving none: a pushed stone shades its surroundings from the start of the push, glass still lets light through, and a pushed glowstone keeps lighting the area. This covers the world light used by Simple and Fancy graphics; Vibrant Visuals lights blocks its own way and is unchanged. Tested in game on 26.50 only; 26.60 does not have it yet.
 
 ## [0.3.1] - 2026-11-11
 

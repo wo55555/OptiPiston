@@ -23,6 +23,7 @@
 #include "core/Settings.h"
 
 #include "ll/api/memory/Hook.h"
+#include "ll/api/memory/Memory.h"
 #include "ll/api/mod/NativeMod.h"
 #include "ll/api/service/TargetedBedrock.h"
 
@@ -69,6 +70,9 @@
 #include "mc/world/level/BlockPalette.h"
 #include "mc/world/level/BlockPos.h"
 #include "mc/world/level/BlockSource.h"
+#include "mc/world/level/ChunkBlockPos.h"
+#include "mc/world/level/ChunkPos.h"
+#include "mc/world/level/ILevel.h"
 #include "mc/world/level/Level.h"
 #include "mc/world/level/Tick.h"
 #include "mc/world/level/block/Block.h"
@@ -76,6 +80,10 @@
 #include "mc/world/level/block/actor/MovingBlockActor.h"
 #include "mc/world/level/block/actor/PistonBlockActor.h"
 #include "mc/world/level/block/actor/PistonState.h"
+#include "mc/world/level/chunk/LevelChunk.h"
+#include "mc/world/level/chunk/SubChunk.h"
+#include "mc/world/level/chunk/SubChunkRelighter.h"
+#include "mc/world/level/chunk/SubChunkStorage.h"
 #include "mc/world/phys/AABB.h"
 
 #if OPTIPISTON_MC == 2610
@@ -107,6 +115,7 @@
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #if OPTIPISTON_PROBE
@@ -6921,16 +6930,175 @@ LL_TYPE_INSTANCE_HOOK(
     return origin(::glm::vec2{std::min(scaled.x, kTopTexel), std::min(scaled.y, kTopTexel)});
 }
 
-bool gLightFixInstalled[3]{};
+// ---- Client world light: a moving block blocks and gives light like the block it carries ----
+
+// 26.60 does not export SubChunkRelighter::relightSubChunk or MovingBlockActor::_onUpdatePacket.
+#if OPTIPISTON_MC < 2660
+// Client cells whose moving block carries a known block.
+std::mutex                                                   gCarriedLightMutex;
+std::unordered_map<::BlockPos, ::Block const*, BlockPosHash> gCarriedLight; // guarded by gCarriedLightMutex
+std::atomic<::Block const*>                                  gMovingBlock{nullptr};
+// The relighter of the client subchunk this thread is relighting.
+thread_local ::SubChunkRelighter const* tClientRelighter = nullptr;
+
+// The relighter reads a cell through the block storage of one of the subchunks around it.
+::Block const* carriedLightBlock(::SubChunkRelighter const& relighter, void const* storage, std::uint16_t index) {
+    auto const& subChunks = relighter.mSubChunkPtrArray;
+    auto const& center    = relighter.mCenterChunkPos.get();
+    for (int x = 0; x < 3; ++x) {
+        for (int z = 0; z < 4; ++z) {
+            for (int y = 0; y < 4; ++y) {
+                auto const* subChunk = subChunks[x][z][y];
+                if (!subChunk || subChunk->mBlocksReadPtr[0] != storage) continue;
+                // The storage index is x << 8 | z << 4 | y, and the middle column of the array is the centre chunk.
+                ::BlockPos const pos{
+                    (center.x + x - 1) * 16 + (index >> 8),
+                    subChunk->mAbsoluteIndex * 16 + (index & 15),
+                    (center.z + z - 1) * 16 + ((index >> 4) & 15)
+                };
+                std::lock_guard const guard(gCarriedLightMutex);
+                auto const            it = gCarriedLight.find(pos);
+                return it == gCarriedLight.end() ? nullptr : it->second;
+            }
+        }
+    }
+    return nullptr;
+}
+
+using GetElementFn = ::Block const& (*)(void const*, std::uint16_t);
+
+// The relighter reads cells through the vtable of each block storage class; a hooked getElement would be far slower.
+constexpr std::size_t     kStorageKinds   = 10;
+constexpr std::size_t     kGetElementSlot = 3;
+std::mutex                gStoragePatchMutex;
+void**                    gPatchedSlot[kStorageKinds]{}; // guarded by gStoragePatchMutex
+std::atomic<GetElementFn> gGetElementOrigin[kStorageKinds]{};
+
+// Outside client relighting this costs one thread-local read.
+template <std::size_t I>
+::Block const& carriedLightGetElement(void const* storage, std::uint16_t index) {
+    auto const& block     = gGetElementOrigin[I].load(std::memory_order_relaxed)(storage, index);
+    auto const* relighter = tClientRelighter;
+    if (!relighter || &block != gMovingBlock.load(std::memory_order_relaxed)) return block;
+    auto const* carried = carriedLightBlock(*relighter, storage, index);
+    return carried ? *carried : block;
+}
+
+constexpr auto kGetElementDetours = []<std::size_t... I>(std::index_sequence<I...>) {
+    return std::array<GetElementFn, sizeof...(I)>{&carriedLightGetElement<I>...};
+}(std::make_index_sequence<kStorageKinds>{});
+
+void patchStorage(::SubChunkStorage<::Block> const& storage) {
+    auto** const slot    = *reinterpret_cast<void** const*>(&storage) + kGetElementSlot;
+    auto const   patched = [&] {
+        return std::ranges::find(kGetElementDetours, reinterpret_cast<GetElementFn>(*slot)) != kGetElementDetours.end();
+    };
+    if (patched()) return;
+    std::lock_guard const guard(gStoragePatchMutex);
+    auto const            free = std::ranges::find(gPatchedSlot, nullptr);
+    if (patched() || free == std::end(gPatchedSlot)) return;
+    auto const i = static_cast<std::size_t>(free - std::begin(gPatchedSlot));
+    gGetElementOrigin[i].store(reinterpret_cast<GetElementFn>(*slot), std::memory_order_relaxed);
+    gPatchedSlot[i] = slot;
+    ll::memory::modify(slot, sizeof(void*), [&] { *slot = reinterpret_cast<void*>(kGetElementDetours[i]); });
+}
+
+void unpatchStorages() {
+    std::lock_guard const guard(gStoragePatchMutex);
+    for (std::size_t i = 0; i < kStorageKinds && gPatchedSlot[i]; ++i) {
+        auto** const slot   = gPatchedSlot[i];
+        auto* const  origin = reinterpret_cast<void*>(gGetElementOrigin[i].load(std::memory_order_relaxed));
+        ll::memory::modify(slot, sizeof(void*), [&] { *slot = origin; });
+        gPatchedSlot[i] = nullptr;
+    }
+}
+
+LL_TYPE_INSTANCE_HOOK(
+    OptiPistonClientRelightHook,
+    ll::memory::HookPriority::Normal,
+    ::SubChunkRelighter,
+    &::SubChunkRelighter::relightSubChunk,
+    void,
+    ::LevelChunk const&                       levelChunk,
+    std::vector<::SubChunkLightUpdate> const& alteredBlockList,
+    std::vector<::BlockPos>&                  brightnessChangedList
+) {
+    if (!levelChunk.mLevel.isClientSide()) {
+        origin(levelChunk, alteredBlockList, brightnessChangedList);
+        return;
+    }
+    for (auto const& subChunk : levelChunk.mSubChunks.get()) {
+        if (auto const* storage = subChunk.mBlocksReadPtr[0]) patchStorage(*storage);
+    }
+    auto const saved = std::exchange(tClientRelighter, this);
+    origin(levelChunk, alteredBlockList, brightnessChangedList);
+    tClientRelighter = saved;
+}
+
+// The client learns what a moving block carries from its data, after the cell was already relit as a moving block.
+void noteCarriedLight(::MovingBlockActor const& moving, ::BlockSource& region) {
+    auto const  pos  = moving.mPosition.get();
+    auto const& here = region.getBlock(pos);
+    if (here.getTypeName() != "minecraft:moving_block") return;
+    gMovingBlock.store(&here, std::memory_order_relaxed);
+    auto const& carried = carriedMoving(moving);
+    auto const* block   = carriesBlock(carried) ? wrappedBlockOf(carried) : nullptr;
+    {
+        std::lock_guard const guard(gCarriedLightMutex);
+        // Cells no longer holding a moving block are dropped here, the next time any moving block is noted.
+        std::erase_if(gCarriedLight, [&](auto const& entry) { return &region.getBlock(entry.first) != &here; });
+        if (block) gCarriedLight[pos] = block;
+        else gCarriedLight.erase(pos);
+    }
+    if (!block) return;
+    if (auto* const chunk = region.getChunkAt(pos))
+        chunk->_lightingCallbacks(::ChunkBlockPos{pos, region.getMinHeight()}, here, *block, &region);
+}
+
+LL_TYPE_INSTANCE_HOOK(
+    OptiPistonCarriedLightHook,
+    ll::memory::HookPriority::Normal,
+    ::MovingBlockActor,
+    &::MovingBlockActor::$_onUpdatePacket,
+    void,
+    ::CompoundTag const& data,
+    ::BlockSource&       region
+) {
+    origin(data, region);
+    if (region.getLevel().isClientSide()) noteCarriedLight(*this, region);
+}
+
+void removeCarriedLight(bool& relightInstalled, bool& noteInstalled) {
+    removeHook<OptiPistonCarriedLightHook>(noteInstalled);
+    removeHook<OptiPistonClientRelightHook>(relightInstalled);
+    unpatchStorages();
+    std::lock_guard const guard(gCarriedLightMutex);
+    gCarriedLight.clear();
+}
+
+void installCarriedLight(bool& relightInstalled, bool& noteInstalled) {
+    if (!installHook<OptiPistonClientRelightHook>(relightInstalled)
+        || !installHook<OptiPistonCarriedLightHook>(noteInstalled))
+        removeCarriedLight(relightInstalled, noteInstalled);
+}
+#endif
+
+bool gLightFixInstalled[5]{};
 
 // Not fatal when a hook is missing: the arm then keeps the game's own light.
 void installLightFix() {
     (void)installHook<OptiPistonLightColorHook>(gLightFixInstalled[0]);
     if (colorForUVTarget() != 0) (void)installHook<OptiPistonLightUVHook>(gLightFixInstalled[2]);
     (void)installHook<OptiPistonShaderLightHook>(gLightFixInstalled[1]);
+#if OPTIPISTON_MC < 2660
+    installCarriedLight(gLightFixInstalled[3], gLightFixInstalled[4]);
+#endif
 }
 
 void removeLightFix() {
+#if OPTIPISTON_MC < 2660
+    removeCarriedLight(gLightFixInstalled[3], gLightFixInstalled[4]);
+#endif
     removeHook<OptiPistonShaderLightHook>(gLightFixInstalled[1]);
     removeHook<OptiPistonLightUVHook>(gLightFixInstalled[2]);
     removeHook<OptiPistonLightColorHook>(gLightFixInstalled[0]);

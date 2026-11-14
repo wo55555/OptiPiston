@@ -5760,10 +5760,12 @@ public:
     ArmLightFixScope(::BlockActor& entity, ::BlockSource& source, bool eligible) : mSaved(tArmLightFix) {
         tArmLightFix = {};
         if (!eligible) return;
-        auto&     piston = static_cast<::PistonBlockActor&>(entity);
-        int const state  = static_cast<int>(piston.mState);
-        // Retracted or Expanded: the cells have settled, the head cell is what the logic left there.
-        if (state != 0 && state != 2) return;
+        auto&               piston = static_cast<::PistonBlockActor&>(entity);
+        ::PistonState const state  = piston.mState;
+        // The head cell can already be opaque while the arm is still retracting.
+        if (state != ::PistonState::Retracted && state != ::PistonState::Expanded
+            && (OPTIPISTON_MC != 2651 || state != ::PistonState::Retracting))
+            return;
         ::BlockPos const at     = entity.mPosition.get();
         ::BlockPos const facing = facingOf(piston, source);
         if (facing.x == 0 && facing.y == 0 && facing.z == 0) return;

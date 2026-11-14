@@ -54,59 +54,187 @@ TEST_CASE("fractional durations set the visual length") {
     CHECK_FALSE(segmentRunning(segment, 5));
 }
 
-TEST_CASE("a corner pose finishes the earlier tail before the new push, landing on time") {
-    auto const next = makeSegment(10, 0.0f, 1.0f, 4.0f);
-    auto const legs = std::vector<float>{0.5f};
-    auto       pose = cornerPose(next, legs, 10.0);
-    CHECK(pose.tailLeft == doctest::Approx(1.0f));
-    CHECK(pose.value == doctest::Approx(0.0f));
-    pose = cornerPose(next, legs, 11.0);
-    CHECK(pose.tailLeft == doctest::Approx(0.25f));
-    CHECK(pose.value == doctest::Approx(0.0f));
-    pose = cornerPose(next, legs, 12.0);
-    CHECK(pose.tailLeft == doctest::Approx(0.0f));
-    CHECK(pose.value == doctest::Approx(0.25f));
-    pose = cornerPose(next, legs, 14.0);
-    CHECK(pose.tailLeft == doctest::Approx(0.0f));
-    CHECK(pose.value == doctest::Approx(1.0f));
+TEST_CASE("a corner path keeps its signed tail and finishes it before turning") {
+    auto const first = carryPushPath(
+        {
+            makeSegment(8, 0.0f, 1.0f, 4.0f),
+            {1, 0, 0}
+    },
+        {},
+        false
+    );
+    auto const path = carryPushPath(
+        {
+            makeSegment(10, 0.0f, 1.0f, 4.0f),
+            {0, 0, 1}
+    },
+        first,
+        true
+    );
+    auto offset = pushPathOffset(path, 10.0);
+    CHECK(offset[0] == doctest::Approx(-0.5f));
+    CHECK(offset[2] == doctest::Approx(-1.0f));
+    offset = pushPathOffset(path, 11.0);
+    CHECK(offset[0] == doctest::Approx(-0.125f));
+    CHECK(offset[2] == doctest::Approx(-1.0f));
+    offset = pushPathOffset(path, 12.0);
+    CHECK(offset[0] == doctest::Approx(0.0f));
+    CHECK(offset[2] == doctest::Approx(-0.75f));
+    CHECK((pushPathOffset(path, 14.0) == std::array<float, 3>{}));
 }
 
-TEST_CASE("a corner pose walks every owed push before the new one, landing on time") {
-    auto const next = makeSegment(10, 0.0f, 1.0f, 4.0f);
-    auto const legs = std::vector<float>{0.5f, 0.5f};
-    auto       pose = cornerPose(next, legs, 10.0);
-    CHECK(pose.tailLeft == doctest::Approx(1.0f));
-    CHECK(pose.value == doctest::Approx(0.0f));
-    pose = cornerPose(next, legs, 11.0);
-    CHECK(pose.tailLeft == doctest::Approx(1.0f));
-    CHECK(pose.value == doctest::Approx(0.0f));
-    pose = cornerPose(next, legs, 12.0);
-    CHECK(pose.tailLeft == doctest::Approx(0.0f));
-    CHECK(pose.value == doctest::Approx(0.0f));
-    pose = cornerPose(next, legs, 13.0);
-    CHECK(pose.tailLeft == doctest::Approx(0.0f));
-    CHECK(pose.value == doctest::Approx(0.5f));
-    pose = cornerPose(next, legs, 14.0);
-    CHECK(pose.tailLeft == doctest::Approx(0.0f));
-    CHECK(pose.value == doctest::Approx(1.0f));
+TEST_CASE("a third push preserves the retimed path and walks the oldest tail first") {
+    auto const first = carryPushPath(
+        {
+            makeSegment(0, 0.0f, 1.0f, 4.0f),
+            {1, 0, 0}
+    },
+        {},
+        false
+    );
+    auto const second = carryPushPath(
+        {
+            makeSegment(1, 0.0f, 1.0f, 4.0f),
+            {0, 0, 1}
+    },
+        first,
+        true
+    );
+    auto const third = carryPushPath(
+        {
+            makeSegment(2, 0.0f, 1.0f, 4.0f),
+            {-1, 0, 0}
+    },
+        second,
+        true
+    );
+    auto       offset = pushPathOffset(third, 2.0);
+    auto const before = pushPathOffset(second, 2.0);
+    CHECK(offset[0] == doctest::Approx(before[0] + 1.0f));
+    CHECK(offset[2] == doctest::Approx(before[2]));
+    CHECK(offset[0] == doctest::Approx(0.6875f));
+    CHECK(offset[2] == doctest::Approx(-1.0f));
+    offset = pushPathOffset(third, 2.5);
+    CHECK(offset[0] == doctest::Approx(0.9765625f));
+    CHECK(offset[2] == doctest::Approx(-1.0f));
+    offset = pushPathOffset(third, 3.0);
+    CHECK(offset[0] == doctest::Approx(1.0f));
+    CHECK(offset[2] == doctest::Approx(-0.734375f));
+    offset = pushPathOffset(third, 4.5);
+    CHECK(offset[0] == doctest::Approx(0.8671875f));
+    CHECK(offset[2] == doctest::Approx(0.0f));
+    CHECK((pushPathOffset(third, 6.0) == std::array<float, 3>{}));
 }
 
-TEST_CASE("corner legs drop pushes that have already finished") {
-    auto const legs = std::vector<CornerLeg>{
-        {{0, 0.0f, 1.0f, 4.0, 4.0}, {1, 0, 0}},
-        {{0, 0.0f, 1.0f, 2.0, 4.0}, {0, 1, 0}},
-    };
-    auto const left = cornerLegsLeft(legs, 3.0);
-    REQUIRE(left.size() == 1);
-    CHECK(left[0] == doctest::Approx(0.25f));
+TEST_CASE("a handoff drops only finished legs and keeps delayed legs") {
+    auto const first = carryPushPath(
+        {
+            makeSegment(0, 0.0f, 1.0f, 4.0f),
+            {1, 0, 0}
+    },
+        {},
+        false
+    );
+    auto const second = carryPushPath(
+        {
+            makeSegment(1, 0.0f, 1.0f, 4.0f),
+            {0, 0, 1}
+    },
+        first,
+        true
+    );
+    auto const third = carryPushPath(
+        {
+            makeSegment(4, 0.0f, 1.0f, 4.0f),
+            {-1, 0, 0}
+    },
+        second,
+        true
+    );
+    REQUIRE(third.size() == 2);
+    CHECK(third[0].facing[2] == 1);
+    auto const offset = pushPathOffset(third, 4.0);
+    CHECK(offset[0] == doctest::Approx(1.0f));
+    CHECK(offset[2] == doctest::Approx(-0.4375f));
 }
 
-TEST_CASE("a corner pose with no tail left is the plain segment") {
+TEST_CASE("a path without a tail is the plain segment including retraction") {
     auto const next = makeSegment(0, 1.0f, 0.0f, 2.0f);
+    auto const path = carryPushPath(
+        {
+            next,
+            {0, 1, 0}
+    },
+        {},
+        true
+    );
     for (double t : {0.0, 0.5, 1.0, 1.5, 2.0, 3.0}) {
-        auto const pose = cornerPose(next, std::vector<float>{}, t);
-        CHECK(pose.tailLeft == doctest::Approx(0.0f));
-        CHECK(pose.value == doctest::Approx(segmentValue(next, t)));
+        auto const offset = pushPathOffset(path, t);
+        CHECK(offset[0] == doctest::Approx(0.0f));
+        CHECK(offset[1] == doctest::Approx(segmentValue(next, t)));
+        CHECK(offset[2] == doctest::Approx(0.0f));
+    }
+}
+
+TEST_CASE("diagonal redirects continue the previous path without retiming it") {
+    auto const first = carryPushPath(
+        {
+            makeSegment(0, 0.0f, 1.0f, 4.0f),
+            {1, 0, 0}
+    },
+        {},
+        false
+    );
+    auto const path = carryPushPath(
+        {
+            makeSegment(1, 0.0f, 1.0f, 4.0f),
+            {0, 0, 1}
+    },
+        first,
+        false
+    );
+    auto const offset = pushPathOffset(path, 2.0);
+    CHECK(offset[0] == doctest::Approx(-0.5f));
+    CHECK(offset[2] == doctest::Approx(-0.75f));
+}
+
+TEST_CASE("a carried retracting push keeps its direction when the path is retimed") {
+    auto const first = carryPushPath(
+        {
+            makeSegment(0, 1.0f, 0.0f, 4.0f),
+            {1, 0, 0}
+    },
+        {},
+        false
+    );
+    auto const path = carryPushPath(
+        {
+            makeSegment(1, 0.0f, 1.0f, 4.0f),
+            {0, 1, 0}
+    },
+        first,
+        true
+    );
+    auto const offset = pushPathOffset(path, 1.0);
+    CHECK(offset[0] == doctest::Approx(0.75f));
+    CHECK(offset[1] == doctest::Approx(-1.0f));
+}
+
+TEST_CASE("repeated redirects keep the handoff continuous and discard finished history") {
+    PushPath path;
+    for (int tick = 0; tick < 1000; ++tick) {
+        auto const  before = pushPathOffset(path, tick);
+        PushPathLeg next{
+            makeSegment(tick, 0.0f, 1.0f, 4.0f),
+            {0, 0, 0}
+        };
+        next.facing[tick % 3] = (tick / 3) % 2 == 0 ? 1 : -1;
+        path                  = carryPushPath(next, path, true);
+        auto const after      = pushPathOffset(path, tick);
+        for (int axis = 0; axis < 3; ++axis) CHECK(after[axis] == doctest::Approx(before[axis] - next.facing[axis]));
+        CHECK(path.size() <= 16);
+        auto const landed = pushPathOffset(path, tick + 4.000001);
+        for (auto const axis : landed) CHECK(axis == doctest::Approx(0.0f));
     }
 }
 

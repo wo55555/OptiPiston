@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <vector>
 
@@ -30,22 +31,17 @@ struct Segment {
 // Segment for a piston action started at `tick` with the current settings.
 [[nodiscard]] Segment makeSegment(int64_t tick, float from, float to, float durationTicks) noexcept;
 
-// tailLeft: share of the current owed push still to cover; value: the new segment's value.
-struct CornerPose {
-    float tailLeft{};
-    float value{};
-};
-
-// One leg of a block's path: the push it is playing now, then the earlier pushes it still owes, oldest last.
-struct CornerLeg {
+// One owed push, with a fractional delay when earlier pushes must finish first.
+struct PushPathLeg {
     Segment segment;
     int     facing[3]{};
+    double  delay{};
 };
+using PushPath = std::vector<PushPathLeg>;
 
-// Distance still owed on each leg at `time`, in the same order.
-[[nodiscard]] std::vector<float> cornerLegsLeft(std::vector<CornerLeg> const& legs, double time) noexcept;
+// Keeps the actual remaining path at the handoff, oldest first; a corner retimes it before the new push.
+[[nodiscard]] PushPath carryPushPath(PushPathLeg next, PushPath const& previous, bool corner);
 
-// Walks the owed legs in order before the new push, landing on time.
-[[nodiscard]] CornerPose cornerPose(Segment const& next, std::vector<float> const& legsLeft, double time) noexcept;
+[[nodiscard]] std::array<float, 3> pushPathOffset(PushPath const& path, double time) noexcept;
 
 } // namespace optipiston::core

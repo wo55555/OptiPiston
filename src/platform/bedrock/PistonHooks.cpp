@@ -370,8 +370,7 @@ struct PushCell {
     ::BlockPos                         pistonPos;
     ActionVisual                       visual; // copied, so a successor can still replay its tail after the action ends
     std::optional<CarryVisual>         carry;
-    // Pushes the block still owes, newest first: its own carried tail, then the tail that one carried.
-    std::vector<ActionVisual>           carried;
+    core::PushPath                      carried;  // the previous push's full path, oldest first
     bool                               corner{}; // the carried tail finishes before the block turns
     core::PushTimeline                 timeline;
     std::shared_ptr<std::string const> wrapped; // block name, shared with the published views
@@ -398,7 +397,7 @@ using PistonMap = std::unordered_map<::BlockPos, PistonVisual, BlockPosHash>;
 struct ReplacedTail {
     uint64_t                  action{}; // the newer action
     CarryVisual               carry;
-    std::vector<ActionVisual> carried; // the tail's own owed pushes, newest first
+    core::PushPath            carried;
 };
 using TailMap   = std::unordered_map<::BlockPos, ReplacedTail, BlockPosHash>;
 using ActionMap = std::unordered_map<uint64_t, ActionVisual>;
@@ -4072,47 +4071,34 @@ float armValue(PistonVisual const& visual, double time) {
     };
 }
 
+core::PushPath pushPathOf(PushCell const& rec, bool corner) {
+    auto const& facing = rec.visual.facing;
+    return core::carryPushPath(
+        {
+            rec.visual.segment,
+            {facing.x, facing.y, facing.z}
+    },
+        rec.carried,
+        corner
+    );
+}
+
 // Where the proxy of this cell is drawn, relative to the cell. Caller holds gAnimMutex.
 ::Vec3 cellOffset(PushCell const& rec, double time) {
     auto const state = rec.timeline.state();
     if (state != PushState::Animating && state != PushState::Landing) return ::Vec3{0.0f, 0.0f, 0.0f};
-    auto const& next = rec.visual.segment;
-    if (rec.carry && rec.corner && time > static_cast<double>(next.startTick)) {
-        auto const start = static_cast<double>(next.startTick);
-        // The block finishes every push it still owes, newest first, before the new one starts.
-        std::vector<core::CornerLeg> legs{
-            {rec.carry->visual.segment,
-             {rec.carry->visual.facing.x, rec.carry->visual.facing.y, rec.carry->visual.facing.z}}
-        };
-        for (auto const& owed : rec.carried)
-            legs.push_back({
-                owed.segment,
-                {owed.facing.x, owed.facing.y, owed.facing.z}
-            });
-        auto const left = core::cornerLegsLeft(legs, start);
-        auto const pose = core::cornerPose(next, left, time);
-        auto const rel  = pose.value - next.to;
-        auto       out  = ::Vec3{
-            static_cast<float>(rec.visual.facing.x) * rel,
-            static_cast<float>(rec.visual.facing.y) * rel,
-            static_cast<float>(rec.visual.facing.z) * rel
-        };
-        if (pose.tailLeft > 0.0f) {
-            auto const& leg  = legs[legs.size() - left.size()];
-            out.x           += static_cast<float>(leg.facing[0]) * pose.tailLeft;
-            out.y           += static_cast<float>(leg.facing[1]) * pose.tailLeft;
-            out.z           += static_cast<float>(leg.facing[2]) * pose.tailLeft;
-        }
-        return out;
+    if (!rec.carry) return actionOffset(rec.visual, time);
+    if (!rec.corner || time <= static_cast<double>(rec.visual.segment.startTick)) {
+        auto       offset  = actionOffset(rec.visual, time);
+        auto const tail    = core::pushPathOffset(rec.carried, time);
+        offset.x          += tail[0];
+        offset.y          += tail[1];
+        offset.z          += tail[2];
+        return offset;
     }
-    auto offset = actionOffset(rec.visual, time);
-    if (rec.carry) {
-        auto const tail  = actionOffset(rec.carry->visual, time);
-        offset.x        += tail.x;
-        offset.y        += tail.y;
-        offset.z        += tail.z;
-    }
-    return offset;
+    auto const path   = pushPathOf(rec, true);
+    auto const offset = core::pushPathOffset(path, time);
+    return ::Vec3{offset[0], offset[1], offset[2]};
 }
 
 // Caller holds gAnimMutex. The proxy is destroyed by whoever drops `drop`, after the lock is gone.
@@ -5050,8 +5036,7 @@ void commitProxyLocked(NewProxy& made, Graveyard& drop) {
         // A newer action's record there holds a block that entered after this one left.
         if (old != gCells.end() && old->second.action < made.action && !old->second.timeline.superseded()) {
             rec.carry   = CarryVisual{old->second.action, old->second.visual};
-            rec.carried = old->second.carried;
-            if (old->second.carry) rec.carried.insert(rec.carried.begin(), old->second.carry->visual);
+            rec.carried = pushPathOf(old->second, old->second.corner);
             pure      = false;
             old->second.timeline.supersededBy(made.action);
             takeProxy(old->second, drop);
@@ -5087,13 +5072,8 @@ void commitProxyLocked(NewProxy& made, Graveyard& drop) {
             gReplacedTails[made.cell] = ReplacedTail{
                 made.action,
                 CarryVisual{replaced->second.action, replaced->second.visual},
-                replaced->second.carried
+                pushPathOf(replaced->second, replaced->second.corner)
             };
-            if (replaced->second.carry)
-                gReplacedTails[made.cell].carried.insert(
-                    gReplacedTails[made.cell].carried.begin(),
-                    replaced->second.carry->visual
-                );
         }
         if (replaced->second.timeline.state() != PushState::Done) replaced->second.timeline.supersededBy(made.action);
         takeProxy(replaced->second, drop);

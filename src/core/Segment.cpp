@@ -33,29 +33,41 @@ Segment makeSegment(int64_t tick, float from, float to, float durationTicks) noe
     return {tick, from, to, length, static_cast<double>(MaxDurationTicks)};
 }
 
-std::vector<float> cornerLegsLeft(std::vector<CornerLeg> const& legs, double time) noexcept {
-    std::vector<float> left;
-    left.reserve(legs.size());
-    for (auto const& leg : legs) {
-        auto const remaining = std::abs(segmentValue(leg.segment, time) - leg.segment.to);
-        if (remaining > 0.0f) left.push_back(remaining);
+PushPath carryPushPath(PushPathLeg next, PushPath const& previous, bool corner) {
+    PushPath path;
+    path.reserve(previous.size() + 1);
+    auto const start  = static_cast<double>(next.segment.startTick);
+    auto const length = next.segment.length;
+    auto       total  = std::abs(next.segment.to - next.segment.from);
+    for (auto leg : previous) {
+        auto const offset = segmentValue(leg.segment, start - leg.delay) - leg.segment.to;
+        if (offset == 0.0f) continue;
+        total += std::abs(offset);
+        if (corner) {
+            leg.segment.startTick = next.segment.startTick;
+            leg.segment.from      = leg.segment.to + offset;
+        }
+        path.push_back(leg);
     }
-    return left;
+    path.push_back(next);
+    if (corner && total > 0.0f) {
+        double delay = 0.0;
+        for (auto& leg : path) {
+            leg.delay           = delay;
+            leg.segment.length  = length * std::abs(leg.segment.to - leg.segment.from) / total;
+            delay              += leg.segment.length;
+        }
+    }
+    return path;
 }
 
-CornerPose cornerPose(Segment const& next, std::vector<float> const& legsLeft, double time) noexcept {
-    auto const span = std::abs(next.to - next.from);
-    auto       tail = 0.0f;
-    for (auto const leg : legsLeft) tail += leg;
-    if (next.length <= 0.0 || tail + span <= 0.0f) return {0.0f, next.to};
-    auto const f      = std::clamp((time - static_cast<double>(next.startTick)) / next.length, 0.0, 1.0);
-    auto       walked = static_cast<float>(f) * (tail + span);
-    for (auto const leg : legsLeft) {
-        if (walked < leg) return {1.0f - walked / leg, next.from};
-        walked -= leg;
+std::array<float, 3> pushPathOffset(PushPath const& path, double time) noexcept {
+    std::array<float, 3> offset{};
+    for (auto const& leg : path) {
+        auto const left = segmentValue(leg.segment, time - leg.delay) - leg.segment.to;
+        for (int axis = 0; axis < 3; ++axis) offset[axis] += static_cast<float>(leg.facing[axis]) * left;
     }
-    auto const on = span > 0.0f ? std::min(walked / span, 1.0f) : 1.0f;
-    return {0.0f, next.from + (next.to - next.from) * on};
+    return offset;
 }
 
 } // namespace optipiston::core

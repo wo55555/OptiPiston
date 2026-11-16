@@ -5757,8 +5757,7 @@ public:
         auto&               piston = static_cast<::PistonBlockActor&>(entity);
         ::PistonState const state  = piston.mState;
         // The head cell can already be opaque while the arm is still retracting.
-        if (state != ::PistonState::Retracted && state != ::PistonState::Expanded
-            && (OPTIPISTON_MC != 2651 || state != ::PistonState::Retracting))
+        if (state != ::PistonState::Retracted && state != ::PistonState::Expanded && state != ::PistonState::Retracting)
             return;
         ::BlockPos const at     = entity.mPosition.get();
         ::BlockPos const facing = facingOf(piston, source);

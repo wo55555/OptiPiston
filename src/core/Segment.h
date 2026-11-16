@@ -44,4 +44,7 @@ using PushPath = std::vector<PushPathLeg>;
 
 [[nodiscard]] std::array<float, 3> pushPathOffset(PushPath const& path, double time) noexcept;
 
+// Progress of the newest push in `path`, delayed behind any earlier legs.
+[[nodiscard]] float pushPathProgress(PushPath const& path, double time) noexcept;
+
 } // namespace optipiston::core

@@ -83,6 +83,36 @@ TEST_CASE("a corner path keeps its signed tail and finishes it before turning") 
     CHECK((pushPathOffset(path, 14.0) == std::array<float, 3>{}));
 }
 
+TEST_CASE("a corner head shares the front block's retimed progress in every direction") {
+    for (int axis = 0; axis < 3; ++axis) {
+        for (int sign : {-1, 1}) {
+            PushPathLeg previous{makeSegment(8, 0.0f, 1.0f, 4.0f)};
+            previous.facing[(axis + 1) % 3] = 1;
+            PushPathLeg next{makeSegment(10, 0.0f, 1.0f, 4.0f)};
+            next.facing[axis] = sign;
+            auto const path   = carryPushPath(next, {previous}, true);
+            CHECK(pushPathProgress(path, 11.0) == doctest::Approx(0.0f));
+            CHECK(pushPathProgress(path, 12.0) == doctest::Approx(0.25f));
+            CHECK(pushPathProgress(path, 14.0) == doctest::Approx(1.0f));
+            for (int sample = 0; sample <= 80; ++sample) {
+                auto const time   = 10.0 + sample * 0.05;
+                auto const offset = pushPathOffset(path, time);
+                CHECK(pushPathProgress(path, time) == doctest::Approx(1.0f + sign * offset[axis]));
+            }
+        }
+    }
+}
+
+TEST_CASE("path progress uses the newest push rather than older motion on the same axis") {
+    PushPath path{
+        {makeSegment(10, 0.0f, 1.0f, 4.0f), {1, 0, 0}},
+        {makeSegment(12, 0.0f, 1.0f, 4.0f), {-1, 0, 0}, 1.0}
+    };
+    CHECK(pushPathProgress(path, 12.5) == doctest::Approx(0.0f));
+    CHECK(pushPathProgress(path, 14.0) == doctest::Approx(0.25f));
+    CHECK(pushPathProgress(path, 17.0) == doctest::Approx(1.0f));
+}
+
 TEST_CASE("a third push preserves the retimed path and walks the oldest tail first") {
     auto const first = carryPushPath(
         {

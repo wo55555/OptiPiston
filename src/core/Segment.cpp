@@ -70,4 +70,10 @@ std::array<float, 3> pushPathOffset(PushPath const& path, double time) noexcept 
     return offset;
 }
 
+float pushPathProgress(PushPath const& path, double time) noexcept {
+    if (path.empty()) return 1.0f;
+    auto const& leg = path.back();
+    return segmentValue(leg.segment, time - leg.delay);
+}
+
 } // namespace optipiston::core

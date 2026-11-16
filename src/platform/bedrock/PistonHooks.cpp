@@ -4700,6 +4700,18 @@ struct LazyTime {
 std::optional<float> armProgressIn(StateRef const& state, ::BlockPos const& pistonPos, LazyTime const& time) {
     auto const it = state.pistons.find(pistonPos);
     if (it == state.pistons.end() || it->second.vacated) return std::nullopt;
+    if (it->second.current.to > it->second.current.from) {
+        auto const action = state.actions.find(it->second.action);
+        if (action != state.actions.end()) {
+            auto const& facing = action->second.facing;
+            auto const  front  = state.cells.find(pistonPos + facing + facing);
+            if (front != state.cells.end() && front->second.action == it->second.action && front->second.corner
+                && !front->second.timeline.superseded()) {
+                // The head and front block use the same retimed push segment.
+                return core::pushPathProgress(pushPathOf(front->second, true), time.get());
+            }
+        }
+    }
     return armValue(it->second, time.get());
 }
 

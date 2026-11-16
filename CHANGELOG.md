@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Fixed piston arms and heads turning black during retraction with Vibrant Visuals on 26.50, whether moving-block lighting is on or off.
 - Fixed blocks jumping or moving backwards through earlier pushes when redirected repeatedly before their animations finish. The remaining path now keeps its direction and finishes the oldest push first. Verified in game on 26.50.
+- Fixed pushed blocks briefly taking a sibling block's appearance when redirected together before their animations finish.
 
 ## [0.3.2] - 2026-11-13
 

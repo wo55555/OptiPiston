@@ -4930,6 +4930,8 @@ SnapshotPlan planSnapshot(StateRef const& state, ::MovingBlockActor const& movin
         // The game rebuilds the carried block and actor mid-push; the proxy follows the live instance.
         auto const& proxy   = known->second.proxy;
         auto const& carried = carriedMoving(moving);
+        // A nested instance can briefly describe a sibling's block while the game rebuilds it.
+        if (known->second.wrapped && wrappedName(carried) != *known->second.wrapped) return plan;
         if (!proxy || !carriesBlock(carried)
             || (wrappedActorOf(*proxy) == carriedActorOf(carried) && wrappedBlockOf(*proxy) == wrappedBlockOf(carried)))
             return plan;

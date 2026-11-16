@@ -26,6 +26,7 @@ struct PistonSettings {
 // Requested singleplayer world speed; applied only while the world qualifies.
 struct WorldSpeedSettings {
     std::atomic<float> requested{1.0f};
+    std::atomic_bool   paused{false};
     std::atomic_bool   audio{true};
     std::atomic_bool   particles{true};
     // Speed actually in effect this frame; 1 whenever the world does not qualify.

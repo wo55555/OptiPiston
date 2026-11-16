@@ -64,7 +64,7 @@ Download `OptiPiston-mc<line>-windows-x64.zip` for your line (for example `OptiP
 - **Smooth piston animation**: Arms and pushed blocks move over 2–4 game ticks, fractions included. Rendering only; game logic keeps its native timing.
 - **Clean hand-off**: A pushed block stays drawn until its real block has been re-meshed, which avoids gaps, ghost copies, and overlap where it lands.
 - **Stable heads**: Each cell draws exactly one piston head, and a piston that is itself being pushed follows its moving body.
-- **World speed**: Runs a singleplayer world at 0.01x–100x, with optional sound pitch and particle scaling.
+- **World speed**: Pauses a singleplayer world or runs it at 0.01x–100x, with optional sound pitch and particle scaling.
 - **External clock API**: Replay and recording mods can drive the animation clock through a small C API, so pause, seek, and speed changes stay in sync.
 - **Bilingual**: English and Simplified Chinese command output.
 
@@ -84,6 +84,8 @@ Download `OptiPiston-mc<line>-windows-x64.zip` for your line (for example `OptiP
 | `/optipiston speed next`               | Switch to the next world speed preset.                                       |
 | `/optipiston speed prev`               | Switch to the previous world speed preset.                                   |
 | `/optipiston speed reset`              | Return to normal speed (`1x`).                                               |
+| `/optipiston speed pause`              | Pause world simulation.                                                     |
+| `/optipiston speed resume`             | Resume at the speed used before pausing.                                     |
 
 Piston settings are saved to the configuration file. With `Corner`, a block that another piston pushes before its first push has finished speeds up to finish that push, then turns at a right angle; it still lands at the same time. Pushes along the same axis always play as before. World speed applies only in a local world with no other players connected and while no other mod drives the clock; `/optipiston status` shows the reason when it is not applied.
 

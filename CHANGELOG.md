@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Commands `/optipiston speed pause` and `/optipiston speed resume` to pause and resume singleplayer world simulation.
+
 ### Fixed
 
 - Fixed piston arms and heads turning black during retraction with Vibrant Visuals, whether moving-block lighting is on or off.

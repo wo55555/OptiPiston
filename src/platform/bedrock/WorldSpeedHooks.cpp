@@ -6,6 +6,7 @@
 #include "ll/api/event/EventBus.h"
 #include "ll/api/event/ListenerBase.h"
 #include "ll/api/event/client/ClientExitLevelEvent.h"
+#include "ll/api/event/player/PlayerJoinEvent.h"
 #include "ll/api/event/server/ServerStoppingEvent.h"
 #include "ll/api/event/world/ServerLevelTickEvent.h"
 #include "ll/api/io/Logger.h"
@@ -69,12 +70,9 @@ std::mutex                                gTimerMutex;
 std::unordered_map<::Timer*, ScaledTimer> gScaledTimers;
 std::unordered_set<::Timer const*>        gLoggedTimers;
 
-bool isSimTimer(::Timer const* timer) {
-    for (bool const clientSide : {false, true}) {
-        auto minecraft = ll::service::getMinecraft(clientSide);
-        if (minecraft && &static_cast<::Timer&>(minecraft->mSimTimer) == timer) return true;
-    }
-    return false;
+bool isSimTimer(::Timer const* timer, bool clientSide) {
+    auto minecraft = ll::service::getMinecraft(clientSide);
+    return minecraft && &static_cast<::Timer&>(minecraft->mSimTimer) == timer;
 }
 
 // Logs which timers get scaled; one line per timer.
@@ -131,7 +129,8 @@ std::atomic<float> gAudioApplied{1.0f};
 
 float targetAudioSpeed() {
     auto const& world = core::worldSpeedSettings();
-    return world.audio.load(std::memory_order_relaxed) ? world.applied.load(std::memory_order_relaxed) : 1.0f;
+    auto const  speed = world.applied.load(std::memory_order_relaxed);
+    return world.audio.load(std::memory_order_relaxed) && speed > 0.0f ? speed : 1.0f;
 }
 
 void scaleGroup(void* group, float ratio, int depth) {
@@ -248,18 +247,21 @@ LL_TYPE_INSTANCE_HOOK(
     void,
     OPTIPISTON_TIMER_PARAMS
 ) {
-    auto const speed  = core::worldSpeedSettings().applied.load(std::memory_order_relaxed);
+    auto const& world  = core::worldSpeedSettings();
+    bool const  client = isSimTimer(this, true);
+    if (client && world.paused.load(std::memory_order_relaxed)) refreshWorldSpeed();
+    auto const speed  = world.applied.load(std::memory_order_relaxed);
     bool       scaled = false;
     {
         std::lock_guard const guard(gTimerMutex);
         auto const            it = gScaledTimers.find(this);
         // The game changed the scale since our write (pause, native slow-down); that becomes the new base.
         if (it != gScaledTimers.end() && mTimeScale != it->second.written) it->second.base = mTimeScale;
-        if (speed != 1.0f) {
+        if (speed != 1.0f && (client || it != gScaledTimers.end() || isSimTimer(this, false))) {
             if (it != gScaledTimers.end()) {
                 it->second.written = it->second.base * speed;
                 mTimeScale         = it->second.written;
-            } else if (isSimTimer(this)) {
+            } else {
                 ScaledTimer const entry{mTimeScale, mTimeScale * speed};
                 gScaledTimers.emplace(this, entry);
                 mTimeScale = entry.written;
@@ -333,6 +335,16 @@ void listen() {
             counts.active
         );
     }));
+    gListeners.push_back(bus.emplaceListener<ll::event::PlayerJoinEvent>(
+        [](auto& event) {
+            auto const& player = event.self();
+            if (!event.isCancelled() && !player.mIsHostingPlayer && !player.isSimulatedPlayer()) {
+                gGuestPlayers.fetch_add(1, std::memory_order_relaxed);
+                core::worldSpeedSettings().applied.store(1.0f, std::memory_order_relaxed);
+            }
+        },
+        ll::event::EventPriority::Lowest
+    ));
     // The server's timer is still alive here and gone right after.
     gListeners.push_back(bus.emplaceListener<ll::event::ServerStoppingEvent>([](auto&&) {
         gLocalServerTicking.store(false, std::memory_order_release);
@@ -360,7 +372,9 @@ void refreshWorldSpeed() {
     auto&       world   = core::worldSpeedSettings();
     auto const* blocker = computeBlocker();
     gBlocker.store(blocker, std::memory_order_relaxed);
-    world.applied.store(blocker ? 1.0f : world.requested.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    auto const target =
+        world.paused.load(std::memory_order_relaxed) ? 0.0f : world.requested.load(std::memory_order_relaxed);
+    world.applied.store(blocker ? 1.0f : target, std::memory_order_relaxed);
 }
 
 char const* worldSpeedBlocker() { return gBlocker.load(std::memory_order_relaxed); }

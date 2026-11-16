@@ -32,13 +32,20 @@ std::string translate(char const* key) {
     return std::string{ll::i18n::getInstance().get(key, ll::i18n::getDefaultLocaleCode())};
 }
 
+void reportWorldSpeed(CommandOutput& output) {
+    auto const& world = core::worldSpeedSettings();
+    platform::refreshWorldSpeed();
+    if (world.paused.load()) output.success("optipiston.command.speed.pause"_tr());
+    else output.success("optipiston.command.speed.set"_tr(world.requested.load()));
+    if (auto const* blocker = platform::worldSpeedBlocker())
+        output.error("optipiston.command.speed.blocked"_tr(translate(blocker)));
+}
+
 void setWorldSpeed(CommandOutput& output, float value) {
     auto& world = core::worldSpeedSettings();
     world.requested.store(core::clampWorldSpeed(value));
-    platform::refreshWorldSpeed();
-    output.success("optipiston.command.speed.set"_tr(world.requested.load()));
-    if (auto const* blocker = platform::worldSpeedBlocker())
-        output.error("optipiston.command.speed.blocked"_tr(translate(blocker)));
+    world.paused.store(false);
+    reportWorldSpeed(output);
 }
 
 void setPistonEnabled(CommandOutput& output, bool enabled) {
@@ -126,6 +133,14 @@ void registerCommands(std::string const& name) {
     command.overload().text("speed").text("reset").execute([](CommandOrigin const&, CommandOutput& output) {
         setWorldSpeed(output, 1.0f);
     });
+    command.overload().text("speed").text("pause").execute([](CommandOrigin const&, CommandOutput& output) {
+        core::worldSpeedSettings().paused.store(true);
+        reportWorldSpeed(output);
+    });
+    command.overload().text("speed").text("resume").execute([](CommandOrigin const&, CommandOutput& output) {
+        core::worldSpeedSettings().paused.store(false);
+        reportWorldSpeed(output);
+    });
     command.overload().text("speed").text("next").execute([](CommandOrigin const&, CommandOutput& output) {
         auto const presets = OptiPiston::getInstance().getConfig().worldSpeed.presets;
         setWorldSpeed(output, core::nextPreset(presets, core::worldSpeedSettings().requested.load()));
@@ -149,7 +164,7 @@ void registerCommands(std::string const& name) {
         );
         output.success(
             "optipiston.command.status.world"_tr(
-                world.requested.load(),
+                world.paused.load() ? 0.0f : world.requested.load(),
                 world.applied.load(),
                 blocker ? translate(blocker) : "optipiston.command.status.active"_tr()
             )

@@ -127,9 +127,11 @@ bool OptiPiston::enable() {
     // World speed is per session: every world starts at 1x.
     impl->mListeners.emplace(bus.emplaceListener<ll::event::ClientJoinLevelEvent>([](auto&&) {
         core::worldSpeedSettings().requested.store(1.0f);
+        core::worldSpeedSettings().paused.store(false);
     }));
     impl->mListeners.emplace(bus.emplaceListener<ll::event::ClientExitLevelEvent>([](auto&&) {
         core::worldSpeedSettings().requested.store(1.0f);
+        core::worldSpeedSettings().paused.store(false);
         core::externalClock().clear();
     }));
     impl->mListeners.emplace(bus.emplaceListener<ll::event::ClientLevelTickEvent>([](auto&&) {
@@ -145,6 +147,7 @@ bool OptiPiston::disable() {
     impl->mListeners.clear();
 
     core::worldSpeedSettings().requested.store(1.0f);
+    core::worldSpeedSettings().paused.store(false);
     platform::refreshWorldSpeed();
     if (impl->mWorldSpeedInstalled && !platform::hookWorldSpeed(false)) {
         logger.error("Unable to remove world speed hooks");

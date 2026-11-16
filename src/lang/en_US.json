@@ -17,6 +17,7 @@
             },
             "speed": {
                 "set": "Requested world speed: {}x",
+                "pause": "Requested world pause",
                 "range": "World speed must be between {} and {}",
                 "blocked": "Not applied: {}"
             },

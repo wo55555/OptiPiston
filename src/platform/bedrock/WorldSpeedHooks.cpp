@@ -17,6 +17,7 @@
 
 #include "mc/client/game/ClientInstance.h"
 #include "mc/client/particlesystem/particle/ParticleEmitterActual.h"
+#include "mc/client/particlesystem/particle/ParticleSystemEngine.h"
 #include "mc/client/player/LocalPlayer.h"
 #include "mc/deps/ecs/gamerefs_entity/EntityContext.h"
 #include "mc/entity/components/IPlayerTickPolicy.h"
@@ -34,7 +35,9 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <memory>
 #include <mutex>
+#include <random>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -350,6 +353,48 @@ LL_TYPE_INSTANCE_HOOK(
     origin(scaledDt, a);
 }
 
+// Ambient emitters such as campfire smoke are fed one particle at a time by game code that keeps its normal
+// rate. Particle lifetimes stretch with the scaled step, so the same fraction of those emissions is dropped
+// to keep the density unchanged.
+bool dropAmbientEmission() {
+    auto const& world = core::worldSpeedSettings();
+    auto const  speed = world.applied.load(std::memory_order_relaxed);
+    if (speed >= 1.0f || !world.particles.load(std::memory_order_relaxed)) return false;
+    thread_local std::minstd_rand rng{std::random_device{}()};
+    return speed <= 0.0f || std::uniform_real_distribution<float>{0.0f, 1.0f}(rng) >= speed;
+}
+
+#if OPTIPISTON_MC >= 2620
+using ParticleEmitterHandle = Bedrock::slot_map_handle<std::unique_ptr<ParticleSystem::ParticleEmitter>, 64, 32>;
+
+LL_TYPE_INSTANCE_HOOK(
+    OptiPistonParticleEmitHook,
+    ll::memory::HookPriority::Normal,
+    ::ParticleSystemEngine,
+    &::ParticleSystemEngine::emitParticleManually,
+    void,
+    ParticleEmitterHandle handle,
+    ::Vec3 const&         pos,
+    ::Vec3 const&         vel,
+    float                 scale
+) {
+    if (!dropAmbientEmission()) origin(handle, pos, vel, scale);
+}
+#else
+LL_TYPE_INSTANCE_HOOK(
+    OptiPistonParticleEmitHook,
+    ll::memory::HookPriority::Normal,
+    ::ParticleSystem::ParticleEmitterActual,
+    &::ParticleSystem::ParticleEmitterActual::$emitParticleManually,
+    void,
+    ::Vec3 const& pos,
+    ::Vec3 const& vel,
+    float const   scale
+) {
+    if (!dropAmbientEmission()) origin(pos, vel, scale);
+}
+#endif
+
 char const* computeBlocker() {
     if (!gInstalled.load(std::memory_order_acquire)) return "optipiston.worldSpeed.unavailable";
     if (core::externalClock().sample()) return "optipiston.worldSpeed.externalClock";
@@ -452,6 +497,8 @@ bool hookWorldSpeed(bool enable) {
             OptiPistonSimTimerHook::unhook();
             return false;
         }
+        if (OptiPistonParticleEmitHook::hook() != 0)
+            logger.warn("Particle emitter hook unavailable; ambient particles may pile up at low speed");
         if (!hookFmod()) logger.warn("FMOD exports unavailable; world speed will not change audio");
         listen();
         gInstalled.store(true, std::memory_order_release);
@@ -461,6 +508,7 @@ bool hookWorldSpeed(bool enable) {
     unlisten();
     core::worldSpeedSettings().applied.store(1.0f);
     unhookFmod();
+    OptiPistonParticleEmitHook::unhook();
     OptiPistonParticleHook::unhook();
     OptiPistonSimTimerHook::unhook();
     {

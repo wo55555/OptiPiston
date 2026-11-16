@@ -18,12 +18,13 @@
             "speed": {
                 "set": "Requested world speed: {}x",
                 "pause": "Requested world pause",
+                "normalMovement": "Fixed movement speed: {}",
                 "range": "World speed must be between {} and {}",
                 "blocked": "Not applied: {}"
             },
             "status": {
                 "piston": "Piston animation {}, duration {}gt, redirect type {}, moving block lighting {}",
-                "world": "World speed requested {}x, applied {}x ({})",
+                "world": "World speed requested {}x, applied {}x ({}); fixed movement speed {}",
                 "active": "active"
             }
         },

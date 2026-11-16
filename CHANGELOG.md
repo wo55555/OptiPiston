@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Commands `/optipiston speed pause` and `/optipiston speed resume` to pause and resume singleplayer world simulation.
+- A `worldSpeed.normalMovement` option (on by default) and `/optipiston speed normalmovement on|off` command to keep local player movement at normal speed when world speed is changed or paused.
 
 ### Fixed
 

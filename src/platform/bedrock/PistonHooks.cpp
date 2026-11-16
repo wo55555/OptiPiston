@@ -4028,7 +4028,7 @@ std::optional<core::ClockSample> sampleVisualClock() {
     auto  client = ll::service::getClientInstance();
     auto* player = client ? client->getLocalPlayer() : nullptr;
     if (!player) return std::nullopt;
-    return core::ClockSample{static_cast<int64_t>(player->getLevel().getCurrentTick().tickID), 0, false};
+    return worldVisualClock(player->getLevel());
 }
 
 // Inside a render pass the clock is sampled once and shared by every arm of the pass.
@@ -5686,6 +5686,7 @@ LL_TYPE_INSTANCE_HOOK(
     ::BlockSource& region
 ) {
     bool const          client      = region.getLevel().isClientSide();
+    if (client && core::worldSpeedSettings().applied.load(std::memory_order_relaxed) == 0.0f) return;
     float const         beforeP     = mProgress;
     float const         beforeLP    = mLastProgress;
     ::PistonState const beforeState = mState;

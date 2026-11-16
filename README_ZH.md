@@ -64,7 +64,7 @@ lip install github.com/wo55555/OptiPiston#client_mc26_20@<version>
 - **平滑活塞动画**：活塞臂和被推方块在 2–4 游戏刻内完成移动，支持小数。仅影响渲染，游戏逻辑保持原生时序。
 - **平滑衔接**：被推方块在真实方块完成重新建网格前持续绘制，避免落位时出现空洞、重影或重叠。
 - **稳定的活塞头**：每格只绘制一个活塞头；被推动的活塞会随其移动中的机身一起绘制。
-- **世界变速**：可暂停单人世界，或以 0.01x–100x 运行，可选同步缩放声音音调和粒子。
+- **世界变速**：可暂停单人世界，或以 0.01x–100x 运行。可选保持玩家移动速度不变，以及同步缩放声音音调和粒子。
 - **外部时钟 API**：回放、录制类模组可以通过简单的 C API 驱动动画时钟，使暂停、跳转和倍速保持同步。
 - **双语**：命令输出提供英文和简体中文。
 
@@ -86,6 +86,7 @@ lip install github.com/wo55555/OptiPiston#client_mc26_20@<version>
 | `/optipiston speed reset`              | 恢复正常速度（`1x`）。                                 |
 | `/optipiston speed pause`              | 暂停世界模拟。                                        |
 | `/optipiston speed resume`             | 恢复暂停前的速度。                                    |
+| `/optipiston speed normalmovement on/off` | 开关玩家移动修复。                                 |
 
 活塞相关设置会写入配置文件。选择 `Corner` 时，方块在第一次推动结束前被另一个活塞推动，会先加速完成第一次推动，再直角拐弯，落位时间不变；同一轴向上的推动保持原样。世界变速仅在本地世界、没有其他玩家连接且没有其他模组驱动时钟时生效；未生效时 `/optipiston status` 会显示原因。
 
@@ -106,7 +107,8 @@ lip install github.com/wo55555/OptiPiston#client_mc26_20@<version>
     "worldSpeed": {
         "presets": [0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 4.0, 10.0, 20.0, 50.0, 100.0],
         "audio": true,
-        "particles": true
+        "particles": true,
+        "normalMovement": true
     },
     "command": {
         "enabled": true,
@@ -124,6 +126,7 @@ lip install github.com/wo55555/OptiPiston#client_mc26_20@<version>
 | `worldSpeed.presets`         | `speed next` / `speed prev` 循环的速度。               |
 | `worldSpeed.audio`           | 声音播放随世界速度缩放。                               |
 | `worldSpeed.particles`       | 粒子随世界速度缩放。                                   |
+| `worldSpeed.normalMovement`  | 世界暂停或变速时保持本地玩家的正常移动速度。           |
 | `command.command`            | 客户端命令名。                                         |
 
 ## 模组开发者

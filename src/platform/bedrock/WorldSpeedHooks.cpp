@@ -18,6 +18,9 @@
 #include "mc/client/game/ClientInstance.h"
 #include "mc/client/particlesystem/particle/ParticleEmitterActual.h"
 #include "mc/client/player/LocalPlayer.h"
+#include "mc/deps/ecs/gamerefs_entity/EntityContext.h"
+#include "mc/entity/components/IPlayerTickPolicy.h"
+#include "mc/entity/components/ServerPlayerMovementComponent.h"
 #include "mc/util/Timer.h"
 #include "mc/world/Minecraft.h"
 #include "mc/world/actor/player/Player.h"
@@ -28,6 +31,7 @@
 #endif
 #include <Windows.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <mutex>
@@ -70,9 +74,43 @@ std::mutex                                gTimerMutex;
 std::unordered_map<::Timer*, ScaledTimer> gScaledTimers;
 std::unordered_set<::Timer const*>        gLoggedTimers;
 
+std::mutex             gVisualClockMutex;
+core::WorldVisualClock gVisualClock;
+::Level const*         gVisualLevel{};
+
 bool isSimTimer(::Timer const* timer, bool clientSide) {
     auto minecraft = ll::service::getMinecraft(clientSide);
     return minecraft && &static_cast<::Timer&>(minecraft->mSimTimer) == timer;
+}
+
+// Keep the host player's server movement credits topped up so low world speed does not stall local movement.
+void creditLocalMovement(::Timer const* timer) {
+    auto server = ll::service::getMinecraft(false);
+    if (!server || &static_cast<::Timer&>(server->mRealTimer) != timer) return;
+    auto* level = server->getLevel();
+    if (!level) return;
+    level->forEachPlayer([](::Player& player) {
+        if (!player.mIsHostingPlayer) return true;
+        if (auto movement = player.getEntityContext().tryGetComponent<::ServerPlayerMovementComponent>()) {
+            uint64&    credits = movement->mPlayerTickCredits;
+            auto const queued  = static_cast<uint64>(movement->mQueuedUpdates.get().size());
+            credits            = std::max(credits, std::min<uint64>(queued, 20));
+        }
+        return false;
+    });
+}
+
+std::optional<float> updateVisualClock(bool detached, float alpha, double delta = 0.0) {
+    auto  client = ll::service::getClientInstance();
+    auto* player = client ? client->getLocalPlayer() : nullptr;
+    if (!player) return std::nullopt;
+    auto const&           level = player->getLevel();
+    std::lock_guard const guard(gVisualClockMutex);
+    if (gVisualLevel != &level) {
+        gVisualClock = {};
+        gVisualLevel = &level;
+    }
+    return gVisualClock.advance(static_cast<int64_t>(level.getCurrentTick().tickID), detached, alpha, delta);
 }
 
 // Logs which timers get scaled; one line per timer.
@@ -250,14 +288,23 @@ LL_TYPE_INSTANCE_HOOK(
     auto const& world  = core::worldSpeedSettings();
     bool const  client = isSimTimer(this, true);
     if (client && world.paused.load(std::memory_order_relaxed)) refreshWorldSpeed();
-    auto const speed  = world.applied.load(std::memory_order_relaxed);
+    auto const  speed         = world.applied.load(std::memory_order_relaxed);
+    bool const  allowMovement = client && world.normalMovement.load(std::memory_order_relaxed);
+    bool const  detached      = client && (speed == 0.0f || (speed != 1.0f && allowMovement));
+    float const beforeAlpha   = mAlpha;
+    if (client && !detached) {
+        if (auto const held = updateVisualClock(false, beforeAlpha)) {
+            mPassedTime = *held;
+            mAlpha      = *held;
+        }
+    }
     bool       scaled = false;
     {
         std::lock_guard const guard(gTimerMutex);
         auto const            it = gScaledTimers.find(this);
         // The game changed the scale since our write (pause, native slow-down); that becomes the new base.
         if (it != gScaledTimers.end() && mTimeScale != it->second.written) it->second.base = mTimeScale;
-        if (speed != 1.0f && (client || it != gScaledTimers.end() || isSimTimer(this, false))) {
+        if (speed != 1.0f && !allowMovement && (client || it != gScaledTimers.end() || isSimTimer(this, false))) {
             if (it != gScaledTimers.end()) {
                 it->second.written = it->second.base * speed;
                 mTimeScale         = it->second.written;
@@ -274,6 +321,14 @@ LL_TYPE_INSTANCE_HOOK(
     }
     if (speed != 1.0f) logTimerOnce(this, scaled);
     origin(OPTIPISTON_TIMER_ARGS);
+    if (!client && speed > 0.0f && speed < 1.0f && world.normalMovement.load(std::memory_order_relaxed)
+        && gGuestPlayers.load(std::memory_order_relaxed) == 0)
+        creditLocalMovement(this);
+    if (detached) {
+        auto const delta = static_cast<double>(static_cast<float>(mLastTimestep)) * static_cast<float>(mTimeScale)
+                         * static_cast<float>(mTicksPerSecond) * speed;
+        (void)updateVisualClock(true, beforeAlpha, std::max(delta, 0.0));
+    }
 }
 
 LL_TYPE_INSTANCE_HOOK(
@@ -357,6 +412,9 @@ void listen() {
         gLocalServerTicking.store(false, std::memory_order_release);
         gGuestPlayers.store(0, std::memory_order_relaxed);
         refreshWorldSpeed();
+        std::lock_guard const guard(gVisualClockMutex);
+        gVisualLevel = nullptr;
+        gVisualClock = {};
     }));
 }
 
@@ -378,6 +436,12 @@ void refreshWorldSpeed() {
 }
 
 char const* worldSpeedBlocker() { return gBlocker.load(std::memory_order_relaxed); }
+
+core::ClockSample worldVisualClock(::Level const& level) {
+    auto const            tick = static_cast<int64_t>(level.getCurrentTick().tickID);
+    std::lock_guard const guard(gVisualClockMutex);
+    return gVisualLevel == &level ? gVisualClock.sample(tick) : core::ClockSample{tick, 0, false};
+}
 
 bool hookWorldSpeed(bool enable) {
     auto& logger = ll::mod::NativeMod::current()->getLogger();

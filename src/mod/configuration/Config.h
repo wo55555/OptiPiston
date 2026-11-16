@@ -2,6 +2,7 @@
 
 #include "core/Settings.h"
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -15,9 +16,10 @@ struct PistonConfig {
 };
 
 struct WorldSpeedConfig {
-    std::vector<float> presets   = {0.01f, 0.05f, 0.1f, 0.25f, 0.5f, 1.0f, 2.0f, 4.0f, 10.0f, 20.0f, 50.0f, 100.0f};
-    bool               audio     = true;
-    bool               particles = true;
+    std::vector<float>  presets   = {0.01f, 0.05f, 0.1f, 0.25f, 0.5f, 1.0f, 2.0f, 4.0f, 10.0f, 20.0f, 50.0f, 100.0f};
+    bool                audio     = true;
+    bool                particles = true;
+    std::optional<bool> normalMovement = true;
 };
 
 struct CommandConfig {

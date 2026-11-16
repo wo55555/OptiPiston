@@ -29,6 +29,7 @@ struct WorldSpeedSettings {
     std::atomic_bool   paused{false};
     std::atomic_bool   audio{true};
     std::atomic_bool   particles{true};
+    std::atomic_bool   normalMovement{true};
     // Speed actually in effect this frame; 1 whenever the world does not qualify.
     std::atomic<float> applied{1.0f};
 };

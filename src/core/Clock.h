@@ -40,6 +40,18 @@ private:
 
 [[nodiscard]] ExternalClock& externalClock() noexcept;
 
+// Visual tick clock used while the client simulation timer is paused or stays unscaled.
+class WorldVisualClock {
+public:
+    [[nodiscard]] std::optional<float> advance(int64_t tick, bool detached, float alpha, double delta) noexcept;
+    [[nodiscard]] ClockSample          sample(int64_t tick) const noexcept;
+
+private:
+    int64_t                mOffset{};
+    std::optional<int64_t> mTick;
+    double                 mPartial{};
+};
+
 // Detects when timings recorded on the previous clock no longer mean anything.
 class ClockTracker {
 public:

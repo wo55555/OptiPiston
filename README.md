@@ -64,7 +64,7 @@ Download `OptiPiston-mc<line>-windows-x64.zip` for your line (for example `OptiP
 - **Smooth piston animation**: Arms and pushed blocks move over 2–4 game ticks, fractions included. Rendering only; game logic keeps its native timing.
 - **Clean hand-off**: A pushed block stays drawn until its real block has been re-meshed, which avoids gaps, ghost copies, and overlap where it lands.
 - **Stable heads**: Each cell draws exactly one piston head, and a piston that is itself being pushed follows its moving body.
-- **World speed**: Pauses a singleplayer world or runs it at 0.01x–100x, with optional sound pitch and particle scaling.
+- **World speed**: Pauses a singleplayer world or runs it at 0.01x–100x, with optional fixed player movement speed, sound pitch and particle scaling.
 - **External clock API**: Replay and recording mods can drive the animation clock through a small C API, so pause, seek, and speed changes stay in sync.
 - **Bilingual**: English and Simplified Chinese command output.
 
@@ -86,6 +86,7 @@ Download `OptiPiston-mc<line>-windows-x64.zip` for your line (for example `OptiP
 | `/optipiston speed reset`              | Return to normal speed (`1x`).                                               |
 | `/optipiston speed pause`              | Pause world simulation.                                                     |
 | `/optipiston speed resume`             | Resume at the speed used before pausing.                                     |
+| `/optipiston speed normalmovement on/off` | Keep local player movement at normal speed or let it follow world speed. |
 
 Piston settings are saved to the configuration file. With `Corner`, a block that another piston pushes before its first push has finished speeds up to finish that push, then turns at a right angle; it still lands at the same time. Pushes along the same axis always play as before. World speed applies only in a local world with no other players connected and while no other mod drives the clock; `/optipiston status` shows the reason when it is not applied.
 
@@ -106,7 +107,8 @@ The configuration lives at `mods/OptiPiston/config/config.json` and is kept acro
     "worldSpeed": {
         "presets": [0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 4.0, 10.0, 20.0, 50.0, 100.0],
         "audio": true,
-        "particles": true
+        "particles": true,
+        "normalMovement": true
     },
     "command": {
         "enabled": true,
@@ -124,6 +126,7 @@ The configuration lives at `mods/OptiPiston/config/config.json` and is kept acro
 | `worldSpeed.presets`         | Speeds cycled by `speed next` / `speed prev`.                  |
 | `worldSpeed.audio`           | Scale sound playback with world speed.                         |
 | `worldSpeed.particles`       | Scale particles with world speed.                              |
+| `worldSpeed.normalMovement`  | Keep local player movement at normal speed when world speed changes or is paused. |
 | `command.command`            | Name of the client command.                                    |
 
 ## For Mod Developers

@@ -11,6 +11,22 @@
 
 using namespace optipiston::core;
 
+TEST_CASE("world visuals keep their own time while player movement is detached") {
+    WorldVisualClock clock;
+    CHECK_FALSE(clock.advance(100, true, 0.25f, 0.0));
+    CHECK(clock.sample(140).tick == 100);
+    REQUIRE(clock.sample(140).partial);
+    CHECK(*clock.sample(140).partial == doctest::Approx(0.25));
+    CHECK_FALSE(clock.advance(140, true, 0.0f, 0.5));
+    CHECK_FALSE(clock.advance(160, true, 0.0f, 3.5));
+    CHECK(clock.sample(160).tick == 104);
+    auto const partial = clock.advance(160, false, 0.0f, 0.0);
+    REQUIRE(partial);
+    CHECK(*partial == doctest::Approx(0.25));
+    CHECK(clock.sample(161).tick == 105);
+    CHECK_FALSE(clock.sample(161).partial);
+}
+
 TEST_CASE("duration and speed clamp to their ranges") {
     CHECK(clampDuration(1.5f) == 2.0f);
     CHECK(clampDuration(2.5f) == 2.5f);

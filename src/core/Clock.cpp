@@ -57,6 +57,33 @@ std::optional<ClockSample> ExternalClock::sample() const noexcept {
     }
 }
 
+std::optional<float> WorldVisualClock::advance(int64_t tick, bool detached, float alpha, double delta) noexcept {
+    if (detached) {
+        if (!mTick) {
+            mTick    = tick - mOffset;
+            mPartial = alpha;
+        }
+        mPartial         += delta;
+        auto const whole  = static_cast<int64_t>(mPartial);
+        *mTick           += whole;
+        mPartial         -= static_cast<double>(whole);
+    } else if (mTick) {
+        mOffset = tick - *mTick;
+        mTick.reset();
+        return static_cast<float>(mPartial);
+    }
+    return std::nullopt;
+}
+
+ClockSample WorldVisualClock::sample(int64_t tick) const noexcept {
+    return {
+        mTick.value_or(tick - mOffset),
+        0,
+        false,
+        mTick ? std::optional{static_cast<float>(mPartial)} : std::nullopt
+    };
+}
+
 bool ClockTracker::invalidated(ClockSample const& sample) noexcept {
     bool const stale =
         mLast && (mLast->external != sample.external || mLast->epoch != sample.epoch || sample.tick < mLast->tick);

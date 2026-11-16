@@ -71,6 +71,7 @@ void OptiPiston::applyConfig() {
     auto& world = core::worldSpeedSettings();
     world.audio.store(config.worldSpeed.audio);
     world.particles.store(config.worldSpeed.particles);
+    world.normalMovement.store(config.worldSpeed.normalMovement.value_or(true));
 }
 
 void OptiPiston::updateConfig(std::function<void(configuration::Config&)> const& edit) {

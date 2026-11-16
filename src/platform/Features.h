@@ -1,5 +1,9 @@
 #pragma once
 
+#include "core/Clock.h"
+
+class Level;
+
 // Implemented by each src/platform/mcXXXX adapter.
 
 namespace optipiston::platform {
@@ -14,5 +18,8 @@ void refreshWorldSpeed();
 
 // I18n key for why world speed is not applied, or nullptr if it is.
 [[nodiscard]] char const* worldSpeedBlocker();
+
+// Visual tick for the local world, independent of client movement detachment and world pause.
+[[nodiscard]] core::ClockSample worldVisualClock(::Level const& level);
 
 } // namespace optipiston::platform

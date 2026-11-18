@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A `piston.range` option (default `128` blocks, `0` for unlimited) and `/optipiston piston range <blocks>` command to limit piston animation and moving-block lighting fixes by distance from the player.
 - Commands `/optipiston speed pause` and `/optipiston speed resume` to pause and resume singleplayer world simulation.
 - A config-only `worldSpeed.normalMovement` option (on by default) to keep local player movement at normal speed when world speed is changed or paused.
 

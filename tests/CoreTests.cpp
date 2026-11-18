@@ -37,6 +37,21 @@ TEST_CASE("duration and speed clamp to their ranges") {
     CHECK(clampWorldSpeed(100.0f) == doctest::Approx(100.0f));
     CHECK(clampWorldSpeed(1000.0f) == MaxWorldSpeed);
     CHECK(clampWorldSpeed(std::numeric_limits<float>::quiet_NaN()) == 1.0f);
+    CHECK(clampPistonRange(-5) == MinPistonRange);
+    CHECK(clampPistonRange(0) == 0);
+    CHECK(clampPistonRange(64) == 64);
+    CHECK(clampPistonRange(5000) == MaxPistonRange);
+}
+
+TEST_CASE("piston range check matches 3D block-center distance and treats 0 as unlimited") {
+    CHECK(withinPistonRange(0.5, 64.5, 0.5, 1000, 64, 1000, 0));
+    CHECK(withinPistonRange(0.5, 64.5, 0.5, 64, 64, 0, 64));
+    CHECK_FALSE(withinPistonRange(0.5, 64.5, 0.5, 65, 64, 0, 64));
+    CHECK(withinPistonRange(0.5, 64.5, 0.5, 3, 68, 0, 5));
+    CHECK_FALSE(withinPistonRange(0.5, 64.5, 0.5, 4, 68, 0, 5));
+    // Large coordinates must not lose precision or overflow squared distance.
+    CHECK(withinPistonRange(10000000.5, 64.5, -10000000.5, 10000128, 64, -10000001, 128));
+    CHECK_FALSE(withinPistonRange(10000000.5, 64.5, -10000000.5, 10000129, 64, -10000001, 128));
 }
 
 TEST_CASE("4gt matches the original fixed timing") {

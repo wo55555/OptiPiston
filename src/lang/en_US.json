@@ -9,7 +9,11 @@
                 "duration": "Piston animation duration: {}gt",
                 "durationRange": "Duration must be between {} and {} ticks",
                 "redirect": "Redirect type: {}",
-                "lighting": "Moving block lighting: {}"
+                "lighting": "Moving block lighting: {}",
+                "range": "Piston optimization range: {}",
+                "rangeBlocks": "{} blocks",
+                "rangeUnlimited": "unlimited",
+                "rangeLimit": "Optimization range must be between {} and {} blocks (0 for unlimited)"
             },
             "redirect": {
                 "diagonal": "move diagonally",
@@ -22,7 +26,7 @@
                 "blocked": "Not applied: {}"
             },
             "status": {
-                "piston": "Piston animation {}, duration {}gt, redirect type {}, moving block lighting {}",
+                "piston": "Piston animation {}, duration {}gt, redirect type {}, moving block lighting {}, optimization range {}",
                 "world": "World speed requested {}x, applied {}x ({})",
                 "active": "active"
             }

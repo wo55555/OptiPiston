@@ -50,6 +50,7 @@ namespace {
 
 void sanitize(configuration::Config& config) {
     config.piston.durationTicks = core::clampDuration(config.piston.durationTicks);
+    if (config.piston.range) config.piston.range = core::clampPistonRange(*config.piston.range);
     auto& presets               = config.worldSpeed.presets;
     for (auto& value : presets) value = core::clampWorldSpeed(value);
     std::sort(presets.begin(), presets.end());
@@ -68,6 +69,7 @@ void OptiPiston::applyConfig() {
     piston.durationTicks.store(config.piston.durationTicks);
     piston.redirectType.store(config.piston.redirectType);
     piston.movingBlockLighting.store(config.piston.movingBlockLighting);
+    piston.range.store(core::clampPistonRange(config.piston.range.value_or(core::DefaultPistonRange)));
     auto& world = core::worldSpeedSettings();
     world.audio.store(config.worldSpeed.audio);
     world.particles.store(config.worldSpeed.particles);

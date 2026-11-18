@@ -80,13 +80,13 @@ lip install github.com/wo55555/OptiPiston#client_mc26_20@<version>
 | `/optipiston piston redirect corner`   | 推动中被再次推动的方块先加速到位，再直角拐弯（默认）。 |
 | `/optipiston piston lighting on`       | 移动中的方块按它搬运的方块计算光照（默认）。           |
 | `/optipiston piston lighting off`      | 移动中的方块光照交给游戏原生处理。                     |
+| `/optipiston piston range <blocks>`    | 设置活塞优化范围（`0`–`1024` 格，`0` 为不限，默认 `128`）。 |
 | `/optipiston speed <value>`            | 设置世界速度，范围 `0.01` 到 `100`。                   |
 | `/optipiston speed next`               | 切换到下一个世界速度预设。                             |
 | `/optipiston speed prev`               | 切换到上一个世界速度预设。                             |
 | `/optipiston speed reset`              | 恢复正常速度（`1x`）。                                 |
 | `/optipiston speed pause`              | 暂停世界模拟。                                        |
 | `/optipiston speed resume`             | 恢复暂停前的速度。                                    |
-| `/optipiston speed normalmovement on/off` | 开关玩家移动修复。                                 |
 
 活塞相关设置会写入配置文件。选择 `Corner` 时，方块在第一次推动结束前被另一个活塞推动，会先加速完成第一次推动，再直角拐弯，落位时间不变；同一轴向上的推动保持原样。世界变速仅在本地世界、没有其他玩家连接且没有其他模组驱动时钟时生效；未生效时 `/optipiston status` 会显示原因。
 
@@ -102,7 +102,8 @@ lip install github.com/wo55555/OptiPiston#client_mc26_20@<version>
         "enabled": true,
         "durationTicks": 4.0,
         "redirectType": "Corner",
-        "movingBlockLighting": true
+        "movingBlockLighting": true,
+        "range": 128
     },
     "worldSpeed": {
         "presets": [0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 4.0, 10.0, 20.0, 50.0, 100.0],
@@ -123,6 +124,7 @@ lip install github.com/wo55555/OptiPiston#client_mc26_20@<version>
 | `piston.durationTicks`       | 动画时长（游戏刻），范围 `2` 到 `4`。                  |
 | `piston.redirectType`        | 推动中被再次推动的方块的路径：`Diagonal` 或 `Corner`。 |
 | `piston.movingBlockLighting` | 移动中的方块按它搬运的方块计算光照。                   |
+| `piston.range`               | 活塞动画修复的最大距离（格，`0` 为不限，默认 `128`）。 |
 | `worldSpeed.presets`         | `speed next` / `speed prev` 循环的速度。               |
 | `worldSpeed.audio`           | 声音播放随世界速度缩放。                               |
 | `worldSpeed.particles`       | 粒子随世界速度缩放。                                   |

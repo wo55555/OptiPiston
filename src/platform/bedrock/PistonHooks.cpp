@@ -144,6 +144,44 @@ std::atomic_bool gInstalled{false};
 bool smoothPistonRenderEnabled() { return core::pistonSettings().enabled.load(std::memory_order_relaxed); }
 bool movingBlockLightingEnabled() { return core::pistonSettings().movingBlockLighting.load(std::memory_order_relaxed); }
 
+struct PlayerOrigin {
+    std::atomic_bool    valid{false};
+    std::atomic<double> x{0.0};
+    std::atomic<double> y{0.0};
+    std::atomic<double> z{0.0};
+};
+PlayerOrigin gPlayerOrigin;
+
+// Updated on the client thread so tick, packet, and block-actor hooks can check range without touching ClientInstance.
+void refreshPlayerOrigin() {
+    auto  client = ll::service::getClientInstance();
+    auto* player = client ? client->getLocalPlayer() : nullptr;
+    if (!player) {
+        gPlayerOrigin.valid.store(false, std::memory_order_relaxed);
+        return;
+    }
+    auto const& pos = player->getPosition();
+    gPlayerOrigin.x.store(pos.x, std::memory_order_relaxed);
+    gPlayerOrigin.y.store(pos.y, std::memory_order_relaxed);
+    gPlayerOrigin.z.store(pos.z, std::memory_order_relaxed);
+    gPlayerOrigin.valid.store(true, std::memory_order_release);
+}
+
+bool inPistonRange(::BlockPos const& pos) {
+    int const range = core::pistonSettings().range.load(std::memory_order_relaxed);
+    if (range <= 0) return true;
+    if (!gPlayerOrigin.valid.load(std::memory_order_acquire)) return false;
+    return core::withinPistonRange(
+        gPlayerOrigin.x.load(std::memory_order_relaxed),
+        gPlayerOrigin.y.load(std::memory_order_relaxed),
+        gPlayerOrigin.z.load(std::memory_order_relaxed),
+        pos.x,
+        pos.y,
+        pos.z,
+        range
+    );
+}
+
 struct BlockPosHash {
     [[nodiscard]] size_t operator()(::BlockPos const& pos) const noexcept {
         return (static_cast<size_t>(static_cast<uint32_t>(pos.x)) * 73856093u)
@@ -5657,7 +5695,7 @@ LL_TYPE_INSTANCE_HOOK(
     ::BlockActorRendererId rendererId
 ) {
     auto* result = origin(type, pos, rendererId);
-    if (type == ::BlockActorType::PistonArm && smoothPistonRenderEnabled())
+    if (type == ::BlockActorType::PistonArm && smoothPistonRenderEnabled() && inPistonRange(pos))
         mTerrainInterlockData->mRenderVisibilityState = VisibilityState::Visible;
     return result;
 }
@@ -5672,10 +5710,24 @@ LL_TYPE_INSTANCE_HOOK(
     bool              isSticky
 ) {
     auto* result = origin(pos, isSticky);
-    if (smoothPistonRenderEnabled()) mTerrainInterlockData->mRenderVisibilityState = VisibilityState::Visible;
+    if (smoothPistonRenderEnabled() && inPistonRange(pos))
+        mTerrainInterlockData->mRenderVisibilityState = VisibilityState::Visible;
     return result;
 }
 #endif
+
+bool isTrackedPiston(::BlockPos const& pistonPos) {
+    if (!gStateWatch.load(std::memory_order_relaxed)) return false;
+    ViewPin pin;
+    return pin.get().pistons.contains(pistonPos);
+}
+
+bool isTrackedMoving(::MovingBlockActor const& moving) {
+    if (!gStateWatch.load(std::memory_order_relaxed)) return false;
+    ViewPin     pin;
+    auto const& state = pin.get();
+    return state.cells.contains(moving.mPosition.get()) || state.pistons.contains(moving.mPistonBlockPos.get());
+}
 
 LL_TYPE_INSTANCE_HOOK(
     OptiPistonPistonStepHook,
@@ -5698,6 +5750,7 @@ LL_TYPE_INSTANCE_HOOK(
     // Also runs when disabled, so meshes hidden by an unfinished visual get rebuilt.
     if (client) sweepActions(region);
     if (!smoothPistonRenderEnabled()) return;
+    if (client && !inPistonRange(mPosition.get()) && !isTrackedPiston(mPosition.get())) return;
 
     // Unconditional: a hidden piston never reaches the renderer, and tick is the only path that runs while hidden.
     auto& interlock = mTerrainInterlockData.get();
@@ -5789,13 +5842,20 @@ void drawArm(
     OPTIPISTON_PROBE_DO(ArmSplit split; ++tArmTally.calls;)
     auto& interlock = interlockOf(entity);
 
-    bool const enabled = smoothPistonRenderEnabled();
-    bool const hidden  = interlock.mRenderVisibilityState == VisibilityState::InitialNotVisible;
-
     // Same-cell pistons cannot see each other in the chunk, so one head per cell is elected every rendered frame.
     bool const isArm = entity.mType == ::BlockActorType::PistonArm;
     // Drawn by a MovingBlock carrying it; a replay can leave that cell as air instead of moving_block.
     bool const nested = tRenderDepth > 0;
+    // Keep tracked pistons active until their short visual ends even if the player steps outside range mid-push.
+    bool const enabled =
+        smoothPistonRenderEnabled()
+        && (nested || inPistonRange(entity.mPosition.get()) || (isArm && isTrackedPiston(entity.mPosition.get())));
+    if (!enabled) {
+        OPTIPISTON_PROBE_DO(perf.pause();)
+        draw();
+        return;
+    }
+    bool const hidden = interlock.mRenderVisibilityState == VisibilityState::InitialNotVisible;
     OPTIPISTON_PROBE_DO(split.stage(ArmStage::Setup);)
     // A piston in a moving_block cell is cargo, so it loses to an actively extending head.
     bool const isCargo =
@@ -5890,6 +5950,11 @@ void drawMoving(::BaseActorRenderContext&, ::BlockSource& source, ::BlockActor& 
     CarrierScope const carrier(&entity);
 
     if (!smoothPistonRenderEnabled() || !isMoving) {
+        OPTIPISTON_PROBE_DO(perf.pause();)
+        draw();
+        return;
+    }
+    if (&entity != tProxyDraw && !inPistonRange(entity.mPosition.get()) && !isTrackedMoving(*movingPtr)) {
         OPTIPISTON_PROBE_DO(perf.pause();)
         draw();
         return;
@@ -6359,6 +6424,7 @@ LL_TYPE_INSTANCE_HOOK(
     ::mce::TextureResourceService& textureResourceService
 ) {
     OPTIPISTON_PROBE_DO(probeFrameBegin();)
+    refreshPlayerOrigin();
     origin(textureResourceService);
     onFrameEnd();
     OPTIPISTON_PROBE_DO(probeRealFrameEnd();)
@@ -6376,6 +6442,7 @@ LL_TYPE_INSTANCE_HOOK(
     ::FrameRenderObject const& renderObj
 ) {
     OPTIPISTON_PROBE_DO(probeFrameBegin();)
+    refreshPlayerOrigin();
     origin(screenContext, renderObj);
     onFrameEnd();
     OPTIPISTON_PROBE_DO(probeRealFrameEnd();)
@@ -6463,7 +6530,10 @@ LL_TYPE_INSTANCE_HOOK(
     OPTIPISTON_PERF_SCOPE(perf, DataHandler);
     std::optional<HeldPistonData> held;
     if (packet && isPistonData(*packet->mData)) {
-        if (auto const clock = visualClock()) held = HeldPistonData{packet->mPos, *clock, packet->mData->clone()};
+        refreshPlayerOrigin();
+        if (inPistonRange(packet->mPos)) {
+            if (auto const clock = visualClock()) held = HeldPistonData{packet->mPos, *clock, packet->mData->clone()};
+        }
     }
     tBlockActorDataApplied = false;
     ++tBlockActorDataDepth;
@@ -6501,6 +6571,8 @@ LL_TYPE_INSTANCE_HOOK(
     if (mState != ::PistonState::Expanding && mState != ::PistonState::Retracting) return;
     // Late data with no recorded arrival cannot be placed on the timeline; native state already reflects it.
     if (tBlockActorDataDepth == 0 && !heldTick) return;
+    refreshPlayerOrigin();
+    if (!inPistonRange(mPosition.get())) return;
     startAction(
         region,
         mPosition.get(),
@@ -7138,7 +7210,13 @@ void noteCarriedLight(::MovingBlockActor const& moving, ::BlockSource& region) {
         gCarriedLight.clear();
         return;
     }
-    auto const  pos  = moving.mPosition.get();
+    auto const pos = moving.mPosition.get();
+    refreshPlayerOrigin();
+    if (!inPistonRange(pos) && !inPistonRange(moving.mPistonBlockPos.get())) {
+        std::lock_guard const guard(gCarriedLightMutex);
+        gCarriedLight.erase(pos);
+        return;
+    }
     auto const& here = region.getBlock(pos);
     if (here.getTypeName() != "minecraft:moving_block") return;
     gMovingBlock.store(&here, std::memory_order_relaxed);
@@ -7338,6 +7416,7 @@ bool hookPistonRender(bool enable) {
     }
     gHeadEpoch.fetch_add(1, std::memory_order_relaxed);
     clearAnimationState();
+    gPlayerOrigin.valid.store(false, std::memory_order_relaxed);
     OPTIPISTON_PROBE_DO(probeClose();)
 
     gInstalled.store(false, std::memory_order_release);

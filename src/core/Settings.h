@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/Limits.h"
+
 #include <atomic>
 #include <cstdint>
 #include <vector>
@@ -19,6 +21,8 @@ struct PistonSettings {
     std::atomic<RedirectType> redirectType{RedirectType::Corner};
     // A pushed block is lit like the landed one, and blocks and gives light like the block it carries.
     std::atomic_bool movingBlockLighting{true};
+    // Max distance from the player in blocks; 0 disables the distance limit.
+    std::atomic<int> range{DefaultPistonRange};
 };
 
 [[nodiscard]] PistonSettings& pistonSettings() noexcept;

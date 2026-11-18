@@ -18,6 +18,10 @@ struct DurationParams {
     float ticks{};
 };
 
+struct RangeParams {
+    int blocks{};
+};
+
 struct SpeedParams {
     float value{};
 };
@@ -78,6 +82,16 @@ void setMovingBlockLighting(CommandOutput& output, bool enabled) {
     output.success("optipiston.command.piston.lighting"_tr(onOff(enabled)));
 }
 
+std::string rangeText(int blocks) {
+    return blocks <= 0 ? "optipiston.command.piston.rangeUnlimited"_tr()
+                       : "optipiston.command.piston.rangeBlocks"_tr(blocks);
+}
+
+void setPistonRange(CommandOutput& output, int blocks) {
+    OptiPiston::getInstance().updateConfig([blocks](auto& config) { config.piston.range = blocks; });
+    output.success("optipiston.command.piston.range"_tr(rangeText(blocks)));
+}
+
 } // namespace
 
 void registerCommands(std::string const& name) {
@@ -130,6 +144,15 @@ void registerCommands(std::string const& name) {
         .text("lighting")
         .text("off")
         .execute([](CommandOrigin const&, CommandOutput& output) { setMovingBlockLighting(output, false); });
+    command.overload<RangeParams>().text("piston").text("range").required("blocks").execute(
+        [](CommandOrigin const&, CommandOutput& output, RangeParams const& params) {
+            if (params.blocks < core::MinPistonRange || params.blocks > core::MaxPistonRange) {
+                output.error("optipiston.command.piston.rangeLimit"_tr(core::MinPistonRange, core::MaxPistonRange));
+                return;
+            }
+            setPistonRange(output, params.blocks);
+        }
+    );
 
     command.overload<SpeedParams>().text("speed").required("value").execute(
         [](CommandOrigin const&, CommandOutput& output, SpeedParams const& params) {
@@ -172,7 +195,8 @@ void registerCommands(std::string const& name) {
                 onOff(piston.enabled.load()),
                 piston.durationTicks.load(),
                 redirectName(piston.redirectType.load()),
-                onOff(piston.movingBlockLighting.load())
+                onOff(piston.movingBlockLighting.load()),
+                rangeText(piston.range.load())
             )
         );
         output.success(

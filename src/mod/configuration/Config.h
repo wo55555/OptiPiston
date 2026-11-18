@@ -13,6 +13,7 @@ struct PistonConfig {
     float              durationTicks       = 4.0f;
     core::RedirectType redirectType        = core::RedirectType::Corner;
     bool               movingBlockLighting = true;
+    std::optional<int> range               = core::DefaultPistonRange;
 };
 
 struct WorldSpeedConfig {

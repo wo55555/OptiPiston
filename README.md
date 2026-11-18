@@ -86,7 +86,6 @@ Download `OptiPiston-mc<line>-windows-x64.zip` for your line (for example `OptiP
 | `/optipiston speed reset`              | Return to normal speed (`1x`).                                               |
 | `/optipiston speed pause`              | Pause world simulation.                                                     |
 | `/optipiston speed resume`             | Resume at the speed used before pausing.                                     |
-| `/optipiston speed normalmovement on/off` | Keep local player movement at normal speed or let it follow world speed. |
 
 Piston settings are saved to the configuration file. With `Corner`, a block that another piston pushes before its first push has finished speeds up to finish that push, then turns at a right angle; it still lands at the same time. Pushes along the same axis always play as before. World speed applies only in a local world with no other players connected and while no other mod drives the clock; `/optipiston status` shows the reason when it is not applied.
 
@@ -126,7 +125,7 @@ The configuration lives at `mods/OptiPiston/config/config.json` and is kept acro
 | `worldSpeed.presets`         | Speeds cycled by `speed next` / `speed prev`.                  |
 | `worldSpeed.audio`           | Scale sound playback with world speed.                         |
 | `worldSpeed.particles`       | Scale particles with world speed.                              |
-| `worldSpeed.normalMovement`  | Keep local player movement at normal speed when world speed changes or is paused. |
+| `worldSpeed.normalMovement`  | Keep local player movement at normal speed when world speed changes or is paused. Config-only; enabled by default. |
 | `command.command`            | Name of the client command.                                    |
 
 ## For Mod Developers

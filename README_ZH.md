@@ -126,7 +126,7 @@ lip install github.com/wo55555/OptiPiston#client_mc26_20@<version>
 | `worldSpeed.presets`         | `speed next` / `speed prev` 循环的速度。               |
 | `worldSpeed.audio`           | 声音播放随世界速度缩放。                               |
 | `worldSpeed.particles`       | 粒子随世界速度缩放。                                   |
-| `worldSpeed.normalMovement`  | 世界暂停或变速时保持本地玩家的正常移动速度。           |
+| `worldSpeed.normalMovement`  | 世界暂停或变速时保持本地玩家的正常移动速度，默认开启，仅通过配置文件设置。 |
 | `command.command`            | 客户端命令名。                                         |
 
 ## 模组开发者

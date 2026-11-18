@@ -58,11 +58,6 @@ void setWorldSpeed(CommandOutput& output, float value) {
     reportWorldSpeed(output);
 }
 
-void setNormalMovement(CommandOutput& output, bool enabled) {
-    OptiPiston::getInstance().updateConfig([enabled](auto& config) { config.worldSpeed.normalMovement = enabled; });
-    output.success("optipiston.command.speed.normalMovement"_tr(onOff(enabled)));
-}
-
 void setPistonEnabled(CommandOutput& output, bool enabled) {
     OptiPiston::getInstance().updateConfig([enabled](auto& config) { config.piston.enabled = enabled; });
     output.success("optipiston.command.piston.enabled"_tr(onOff(enabled)));
@@ -158,16 +153,6 @@ void registerCommands(std::string const& name) {
         core::worldSpeedSettings().paused.store(false);
         reportWorldSpeed(output);
     });
-    command.overload()
-        .text("speed")
-        .text("normalmovement")
-        .text("on")
-        .execute([](CommandOrigin const&, CommandOutput& output) { setNormalMovement(output, true); });
-    command.overload()
-        .text("speed")
-        .text("normalmovement")
-        .text("off")
-        .execute([](CommandOrigin const&, CommandOutput& output) { setNormalMovement(output, false); });
     command.overload().text("speed").text("next").execute([](CommandOrigin const&, CommandOutput& output) {
         auto const presets = OptiPiston::getInstance().getConfig().worldSpeed.presets;
         setWorldSpeed(output, core::nextPreset(presets, core::worldSpeedSettings().requested.load()));
@@ -194,8 +179,7 @@ void registerCommands(std::string const& name) {
             "optipiston.command.status.world"_tr(
                 world.paused.load() ? 0.0f : world.requested.load(),
                 world.applied.load(),
-                blocker ? translate(blocker) : "optipiston.command.status.active"_tr(),
-                onOff(world.normalMovement.load())
+                blocker ? translate(blocker) : "optipiston.command.status.active"_tr()
             )
         );
     });

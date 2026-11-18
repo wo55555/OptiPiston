@@ -16,13 +16,38 @@
 #include "ll/api/service/TargetedBedrock.h"
 
 #include "mc/client/game/ClientInstance.h"
+#if OPTIPISTON_MC >= 2632
+#include "mc/client/entity/systems/ClientInputUpdateSystem.h"
+#include "mc/deps/vanilla_components/ActorDataFlagComponent.h"
+#include "mc/deps/vanilla_components/MovementAbilitiesComponent.h"
+#include "mc/entity/components/ActorOwnerComponent.h"
+#include "mc/entity/components/MobEffectsComponent.h"
+#include "mc/entity/components/MoveInputComponent.h"
+#include "mc/entity/components/PassengerComponent.h"
+#include "mc/entity/components/RawMoveInputComponent.h"
+#include "mc/entity/components/SneakingComponent.h"
+#include "mc/entity/components/WasInWaterFlagComponent.h"
+#endif
 #include "mc/client/particlesystem/particle/ParticleEmitterActual.h"
 #include "mc/client/particlesystem/particle/ParticleSystemEngine.h"
 #include "mc/client/player/LocalPlayer.h"
 #include "mc/deps/ecs/gamerefs_entity/EntityContext.h"
+#include "mc/deps/ecs/gamerefs_entity/EntityRegistry.h"
+#include "mc/deps/ecs/systems/IEntitySystemsCollection.h"
+#include "mc/deps/ecs/systems/ITickingSystem.h"
+#include "mc/deps/ecs/systems/SystemInfo.h"
+#include "mc/deps/ecs/systems/TickingSystemId.h"
+#if OPTIPISTON_MC >= 2660
+#include "mc/deps/vanilla_components/entity/components/ActorTickedComponent.h"
+#else
+#include "mc/entity/components/ActorTickedComponent.h"
+#endif
+#include "mc/entity/components/ActorMovementTickNeededComponent.h"
 #include "mc/entity/components/IPlayerTickPolicy.h"
 #include "mc/entity/components/ServerPlayerMovementComponent.h"
+#include "mc/entity/systems/EntitySystems.h"
 #include "mc/util/Timer.h"
+#include "mc/world/GameCallbacks.h"
 #include "mc/world/Minecraft.h"
 #include "mc/world/actor/player/Player.h"
 #include "mc/world/level/Level.h"
@@ -80,6 +105,229 @@ std::unordered_set<::Timer const*>        gLoggedTimers;
 std::mutex             gVisualClockMutex;
 core::WorldVisualClock gVisualClock;
 ::Level const*         gVisualLevel{};
+
+using BeforeSimTickFn = void (*)(::GameCallbacks*);
+void*           gBeforeSimTickTarget{};
+BeforeSimTickFn gBeforeSimTickOrigin{};
+
+bool independentMovement() {
+    auto const& world = core::worldSpeedSettings();
+    return gInstalled.load(std::memory_order_acquire) && gLocalServerTicking.load(std::memory_order_acquire)
+        && gGuestPlayers.load(std::memory_order_relaxed) == 0 && world.normalMovement.load(std::memory_order_relaxed)
+        && world.applied.load(std::memory_order_relaxed) != 1.0f;
+}
+
+void beforeSimTickDetour(::GameCallbacks* callbacks) {
+    if (independentMovement()) {
+        auto client = ll::service::getClientInstance();
+        if (client && client->getLocalPlayer() && static_cast<::GameCallbacks*>(&*client) == callbacks) return;
+    }
+    gBeforeSimTickOrigin(callbacks);
+}
+
+bool hookMovementInput() {
+    auto client = ll::service::getClientInstance();
+    if (!client) return false;
+    auto* callbacks = static_cast<::GameCallbacks*>(&*client);
+    // GameCallbacks::onBeforeSimTick (slot 3).
+    gBeforeSimTickTarget = (*reinterpret_cast<void***>(callbacks))[3];
+    if (ll::memory::hook(
+            gBeforeSimTickTarget,
+            reinterpret_cast<ll::memory::FuncPtr>(&beforeSimTickDetour),
+            reinterpret_cast<ll::memory::FuncPtr*>(&gBeforeSimTickOrigin),
+            ll::memory::HookPriority::Normal
+        )
+        != 0) {
+        gBeforeSimTickTarget = nullptr;
+        return false;
+    }
+    return true;
+}
+
+void unhookMovementInput() {
+    if (!gBeforeSimTickTarget) return;
+    ll::memory::unhook(gBeforeSimTickTarget, reinterpret_cast<ll::memory::FuncPtr>(&beforeSimTickDetour));
+    gBeforeSimTickTarget = nullptr;
+}
+
+struct ClientMovementSystems {
+    ::EntitySystems*  owner{};
+    ::ITickingSystem* localRewind{};
+    ::ITickingSystem* clientRewind{};
+    ::ITickingSystem* publishHistory{};
+    ::ITickingSystem* sendInput{};
+    uint              addMovementTickFlagId{~0u};
+    uint              designateClientId{~0u};
+    uint              sendInputId{~0u};
+};
+
+ClientMovementSystems gClientMovementSystems;
+thread_local bool     gSuppressNativeLocalMovement{false};
+thread_local bool     gRestoreTickedAfterSendInput{false};
+
+struct SuppressGuard {
+    bool prev;
+    explicit SuppressGuard(bool enable) : prev(gSuppressNativeLocalMovement) {
+        if (enable) gSuppressNativeLocalMovement = true;
+    }
+    ~SuppressGuard() {
+        gSuppressNativeLocalMovement = prev;
+        gRestoreTickedAfterSendInput = false;
+    }
+};
+
+void stripLocalPlayerSimMovement() {
+    auto  client = ll::service::getClientInstance();
+    auto* player = client ? client->getLocalPlayer() : nullptr;
+    if (!player) return;
+    auto& ctx = player->getEntityContext();
+    ctx.removeComponent<::ActorMovementTickNeededComponent>();
+    ctx.removeComponent<::ActorTickedComponent>();
+}
+
+bool stripLocalPlayerTicked() {
+    auto  client = ll::service::getClientInstance();
+    auto* player = client ? client->getLocalPlayer() : nullptr;
+    if (!player) return false;
+    auto& ctx = player->getEntityContext();
+    if (!ctx.hasComponent<::ActorTickedComponent>()) return false;
+    ctx.removeComponent<::ActorTickedComponent>();
+    return true;
+}
+
+void restoreLocalPlayerTicked() {
+    auto  client = ll::service::getClientInstance();
+    auto* player = client ? client->getLocalPlayer() : nullptr;
+    if (!player) return;
+    auto& ctx = player->getEntityContext();
+    ctx.getRegistry().get_or_emplace<::ActorTickedComponent>(ctx.mEntity);
+}
+
+ClientMovementSystems const& ensureClientMovementSystems(::EntitySystems& systems) {
+    if (gClientMovementSystems.owner == &systems) return gClientMovementSystems;
+    gClientMovementSystems       = {};
+    gClientMovementSystems.owner = &systems;
+    if (auto* collection = systems.mSystems.get()) {
+        uint const limit =
+#if OPTIPISTON_MC >= 2632
+            static_cast<uint>(collection->getLargestSystemIndex());
+#else
+            2048u;
+#endif
+        for (uint i = 0; i < limit; ++i) {
+            ::TickingSystemId const id{i};
+            auto const*             info = collection->getSystemInfoForTickingSystemId(id);
+            if (!info) continue;
+            auto* sys = collection->getTickingSystemForTickingSystemId(id);
+            if (info->mName == "LocalPlayerRewindSystem") gClientMovementSystems.localRewind = sys;
+            else if (info->mName == "ClientPlayerRewindSystem") gClientMovementSystems.clientRewind = sys;
+            else if (info->mName == "PublishHistory") gClientMovementSystems.publishHistory = sys;
+            else if (info->mName == "SendPlayerInputPacketSystem") {
+                gClientMovementSystems.sendInput   = sys;
+                gClientMovementSystems.sendInputId = i;
+            } else if (info->mName == "AddMovementTickFlag") gClientMovementSystems.addMovementTickFlagId = i;
+            else if (info->mName == "ActorMovementTickFilterSystem::designateClientEntities")
+                gClientMovementSystems.designateClientId = i;
+        }
+    }
+    auto prevPre             = std::move(systems.mPreSystemInvoke.get());
+    auto prevPost            = std::move(systems.mPostSystemInvoke.get());
+    systems.mPreSystemInvoke = [prevPre = std::move(prevPre)](::TickingSystemId id) {
+        if (prevPre) prevPre(id);
+        if (!gSuppressNativeLocalMovement) return;
+        if (id.value == gClientMovementSystems.designateClientId) stripLocalPlayerSimMovement();
+        else if (id.value == gClientMovementSystems.sendInputId)
+            gRestoreTickedAfterSendInput = stripLocalPlayerTicked();
+    };
+    systems.mPostSystemInvoke = [prevPost = std::move(prevPost)](::TickingSystemId id) {
+        if (gSuppressNativeLocalMovement) {
+            if (id.value == gClientMovementSystems.addMovementTickFlagId) stripLocalPlayerSimMovement();
+            else if (id.value == gClientMovementSystems.sendInputId && gRestoreTickedAfterSendInput) {
+                restoreLocalPlayerTicked();
+                gRestoreTickedAfterSendInput = false;
+            }
+        }
+        if (prevPost) prevPost(id);
+    };
+    return gClientMovementSystems;
+}
+
+LL_TYPE_INSTANCE_HOOK(
+    OptiPistonLevelEntitySystemsHook,
+    ll::memory::HookPriority::Normal,
+    ::Level,
+    &::Level::$tickEntitySystems,
+    void
+) {
+    auto       client   = ll::service::getClientInstance();
+    auto*      player   = client ? client->getLocalPlayer() : nullptr;
+    bool const suppress = independentMovement() && player && &player->getLevel() == this;
+    if (suppress) (void)ensureClientMovementSystems(this->getEntitySystems());
+    SuppressGuard const guard(suppress);
+    origin();
+}
+
+#if OPTIPISTON_MC >= 2632
+template <class T>
+::Optional<T const> optionalMovementComponent(::EntityContext& ctx) {
+    return {
+        reinterpret_cast<typename ::Optional<T const>::storage_type*>(&ctx.getRegistry().storage<T>()),
+        ctx.mEntity
+    };
+}
+#endif
+
+void tickMovementInput(::Timer const* timer) {
+    if (!independentMovement()) return;
+    auto minecraft = ll::service::getMinecraft(true);
+    if (!minecraft || &static_cast<::Timer&>(minecraft->mRealTimer) != timer) return;
+    auto  client = ll::service::getClientInstance();
+    auto* player = client ? client->getLocalPlayer() : nullptr;
+    if (!player) return;
+    auto*       callbacks = static_cast<::GameCallbacks*>(&*client);
+    auto&       systems   = player->getLevel().getEntitySystems();
+    auto const& sys       = ensureClientMovementSystems(systems);
+    for (int i = 0; i < timer->mTicks; ++i) {
+        auto& ctx = player->getEntityContext();
+#if OPTIPISTON_MC >= 2632
+        auto abilities = ctx.tryGetComponent<::MovementAbilitiesComponent>();
+        auto moveInput = ctx.tryGetComponent<::MoveInputComponent>();
+        auto flags     = ctx.tryGetComponent<::ActorDataFlagComponent>();
+        auto effects   = ctx.tryGetComponent<::MobEffectsComponent>();
+        auto owner     = ctx.tryGetComponent<::ActorOwnerComponent>();
+        auto raw       = ctx.tryGetComponent<::RawMoveInputComponent>();
+        if (!abilities || !moveInput || !flags || !effects || !owner || !raw) continue;
+        ::ClientInputUpdateSystem::inputHandlerUpdatePlayerState(
+            *abilities,
+            *effects,
+            *flags,
+            *owner,
+            *moveInput,
+            optionalMovementComponent<::PassengerComponent>(ctx),
+            optionalMovementComponent<::WasInWaterFlagComponent>(ctx)
+        );
+        ::ClientInputUpdateSystem::extractRawHIDInput(
+            *abilities,
+            *moveInput,
+            *flags,
+            *raw,
+            optionalMovementComponent<::SneakingComponent>(ctx),
+            optionalMovementComponent<::WasInWaterFlagComponent>(ctx)
+        );
+#endif
+        gBeforeSimTickOrigin(callbacks);
+        auto&      registry  = ctx.getRegistry();
+        bool const hadTicked = ctx.hasComponent<::ActorTickedComponent>();
+        registry.get_or_emplace<::ActorMovementTickNeededComponent>(ctx.mEntity);
+        registry.get_or_emplace<::ActorTickedComponent>(ctx.mEntity);
+        if (sys.localRewind) sys.localRewind->tick(ctx.mRegistry);
+        if (sys.clientRewind) sys.clientRewind->tick(ctx.mRegistry);
+        if (sys.publishHistory) sys.publishHistory->tick(ctx.mRegistry);
+        systems.tickMovementCorrectionReplay(ctx.mRegistry);
+        if (sys.sendInput) sys.sendInput->tick(ctx.mRegistry);
+        if (!hadTicked) ctx.removeComponent<::ActorTickedComponent>();
+    }
+}
 
 bool isSimTimer(::Timer const* timer, bool clientSide) {
     auto minecraft = ll::service::getMinecraft(clientSide);
@@ -292,8 +540,7 @@ LL_TYPE_INSTANCE_HOOK(
     bool const  client = isSimTimer(this, true);
     if (client && world.paused.load(std::memory_order_relaxed)) refreshWorldSpeed();
     auto const  speed         = world.applied.load(std::memory_order_relaxed);
-    bool const  allowMovement = client && world.normalMovement.load(std::memory_order_relaxed);
-    bool const  detached      = client && (speed == 0.0f || (speed != 1.0f && allowMovement));
+    bool const  detached      = client && speed == 0.0f;
     float const beforeAlpha   = mAlpha;
     if (client && !detached) {
         if (auto const held = updateVisualClock(false, beforeAlpha)) {
@@ -307,7 +554,7 @@ LL_TYPE_INSTANCE_HOOK(
         auto const            it = gScaledTimers.find(this);
         // The game changed the scale since our write (pause, native slow-down); that becomes the new base.
         if (it != gScaledTimers.end() && mTimeScale != it->second.written) it->second.base = mTimeScale;
-        if (speed != 1.0f && !allowMovement && (client || it != gScaledTimers.end() || isSimTimer(this, false))) {
+        if (speed != 1.0f && (client || it != gScaledTimers.end() || isSimTimer(this, false))) {
             if (it != gScaledTimers.end()) {
                 it->second.written = it->second.base * speed;
                 mTimeScale         = it->second.written;
@@ -324,9 +571,8 @@ LL_TYPE_INSTANCE_HOOK(
     }
     if (speed != 1.0f) logTimerOnce(this, scaled);
     origin(OPTIPISTON_TIMER_ARGS);
-    if (!client && speed > 0.0f && speed < 1.0f && world.normalMovement.load(std::memory_order_relaxed)
-        && gGuestPlayers.load(std::memory_order_relaxed) == 0)
-        creditLocalMovement(this);
+    tickMovementInput(this);
+    if (!client && independentMovement()) creditLocalMovement(this);
     if (detached) {
         auto const delta = static_cast<double>(static_cast<float>(mLastTimestep)) * static_cast<float>(mTimeScale)
                          * static_cast<float>(mTicksPerSecond) * speed;
@@ -456,6 +702,7 @@ void listen() {
     gListeners.push_back(bus.emplaceListener<ll::event::ClientExitLevelEvent>([](auto&&) {
         gLocalServerTicking.store(false, std::memory_order_release);
         gGuestPlayers.store(0, std::memory_order_relaxed);
+        gClientMovementSystems = {};
         refreshWorldSpeed();
         std::lock_guard const guard(gVisualClockMutex);
         gVisualLevel = nullptr;
@@ -467,6 +714,7 @@ void unlisten() {
     auto& bus = ll::event::EventBus::getInstance();
     for (auto const& listener : gListeners) bus.removeListener(listener);
     gListeners.clear();
+    gClientMovementSystems = {};
 }
 
 } // namespace
@@ -492,9 +740,20 @@ bool hookWorldSpeed(bool enable) {
     auto& logger = ll::mod::NativeMod::current()->getLogger();
     if (enable) {
         if (gInstalled.load(std::memory_order_acquire)) return true;
-        if (OptiPistonSimTimerHook::hook() != 0) return false;
+        if (!hookMovementInput()) return false;
+        if (OptiPistonLevelEntitySystemsHook::hook() != 0) {
+            unhookMovementInput();
+            return false;
+        }
+        if (OptiPistonSimTimerHook::hook() != 0) {
+            OptiPistonLevelEntitySystemsHook::unhook();
+            unhookMovementInput();
+            return false;
+        }
         if (OptiPistonParticleHook::hook() != 0) {
             OptiPistonSimTimerHook::unhook();
+            OptiPistonLevelEntitySystemsHook::unhook();
+            unhookMovementInput();
             return false;
         }
         if (OptiPistonParticleEmitHook::hook() != 0)
@@ -511,6 +770,8 @@ bool hookWorldSpeed(bool enable) {
     OptiPistonParticleEmitHook::unhook();
     OptiPistonParticleHook::unhook();
     OptiPistonSimTimerHook::unhook();
+    OptiPistonLevelEntitySystemsHook::unhook();
+    unhookMovementInput();
     {
         // Tracked timers belong to a running server; a stopped one was already restored and cleared.
         std::lock_guard const guard(gTimerMutex);

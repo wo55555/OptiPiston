@@ -41,7 +41,17 @@ void reportWorldSpeed(CommandOutput& output) {
         output.error("optipiston.command.speed.blocked"_tr(translate(blocker)));
 }
 
+bool allowWorldSpeed(CommandOutput& output) {
+    platform::refreshWorldSpeed();
+    if (auto const* blocker = platform::worldSpeedBlocker()) {
+        output.error("optipiston.command.speed.blocked"_tr(translate(blocker)));
+        return false;
+    }
+    return true;
+}
+
 void setWorldSpeed(CommandOutput& output, float value) {
+    if (!allowWorldSpeed(output)) return;
     auto& world = core::worldSpeedSettings();
     world.requested.store(core::clampWorldSpeed(value));
     world.paused.store(false);
@@ -139,10 +149,12 @@ void registerCommands(std::string const& name) {
         setWorldSpeed(output, 1.0f);
     });
     command.overload().text("speed").text("pause").execute([](CommandOrigin const&, CommandOutput& output) {
+        if (!allowWorldSpeed(output)) return;
         core::worldSpeedSettings().paused.store(true);
         reportWorldSpeed(output);
     });
     command.overload().text("speed").text("resume").execute([](CommandOrigin const&, CommandOutput& output) {
+        if (!allowWorldSpeed(output)) return;
         core::worldSpeedSettings().paused.store(false);
         reportWorldSpeed(output);
     });
@@ -166,6 +178,7 @@ void registerCommands(std::string const& name) {
     });
 
     command.overload().text("status").execute([](CommandOrigin const&, CommandOutput& output) {
+        platform::refreshWorldSpeed();
         auto const& piston  = core::pistonSettings();
         auto const& world   = core::worldSpeedSettings();
         auto const* blocker = platform::worldSpeedBlocker();

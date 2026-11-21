@@ -81,8 +81,9 @@ public:
         return (mState == PushState::Landing || mState == PushState::Handover) && mCarriesActor;
     }
 
-    [[nodiscard]] uint64_t    action() const noexcept { return mAction; }
-    [[nodiscard]] bool        landed() const noexcept { return mLanded; }
+    [[nodiscard]] uint64_t       action() const noexcept { return mAction; }
+    [[nodiscard]] Segment const& segment() const noexcept { return mSegment; }
+    [[nodiscard]] bool           landed() const noexcept { return mLanded; }
     [[nodiscard]] bool        carriesActor() const noexcept { return mCarriesActor; }
     [[nodiscard]] bool        superseded() const noexcept { return mSuperseded; }
     [[nodiscard]] double      remeshTime() const noexcept { return mRemeshTime; }

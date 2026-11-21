@@ -14,6 +14,8 @@
 #endif
 
 #include "platform/Features.h"
+#include "platform/bedrock/EmptySubchunkEvictHelper.h"
+#include "platform/bedrock/RtxMovingLightHelper.h"
 
 #include "core/Clock.h"
 #include "core/Limits.h"
@@ -24,6 +26,7 @@
 
 #include "ll/api/memory/Hook.h"
 #include "ll/api/memory/Memory.h"
+#include "ll/api/memory/Signature.h"
 #include "ll/api/mod/NativeMod.h"
 #include "ll/api/service/TargetedBedrock.h"
 #include "ll/api/utils/SystemUtils.h"
@@ -42,11 +45,16 @@
 #include "mc/client/renderer/blockactor/BlockActorRenderDispatcher.h"
 #include "mc/client/renderer/blockactor/MovingBlockActorRenderer.h"
 #include "mc/client/renderer/blockactor/PistonBlockActorRenderer.h"
+#include "mc/client/renderer/Tessellator.h"
+#include "mc/client/renderer/block/BakedBlockLightType.h"
 #include "mc/client/renderer/chunks/RenderChunkCoordinator.h"
 #include "mc/client/renderer/chunks/RenderChunkGeometry.h"
 #if OPTIPISTON_MC >= 2651
 #include "mc/client/renderer/chunks/RenderChunkInstanced.h"
 #endif
+#include "mc/deps/minecraft_renderer/renderer/Mesh.h"
+#include "mc/deps/minecraft_renderer/renderer/MeshData.h"
+#include "mc/world/level/dimension/VanillaDimensions.h"
 #include "mc/client/renderer/game/LevelRenderer.h"
 #include "mc/client/renderer/game/LevelRendererCamera.h"
 #include "mc/client/renderer/game/LevelRendererPlayer.h"
@@ -114,6 +122,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -138,6 +147,7 @@ using VisibilityState = ::ActorTerrainInterlockData::VisibilityState;
 using core::PushDrawer;
 using core::PushState;
 using core::Segment;
+using ll::memory_literals::operator""_sig;
 
 std::atomic_bool gInstalled{false};
 
@@ -345,14 +355,22 @@ struct RenderScope {
 };
 
 // MovingBlock being drawn on this thread; it outlives the piston it carries, which data packets rebuild mid-push.
-thread_local ::BlockActor const* tCarrier = nullptr;
+thread_local ::BlockActor const* tCarrier            = nullptr;
+thread_local std::uint32_t       tCarrierMeshOrdinal = 0;
 
 struct CarrierScope {
-    explicit CarrierScope(::BlockActor const* carrier) : saved(tCarrier) { tCarrier = carrier; }
-    ~CarrierScope() { tCarrier = saved; }
+    explicit CarrierScope(::BlockActor const* carrier) : saved(tCarrier), savedOrdinal(tCarrierMeshOrdinal) {
+        tCarrier            = carrier;
+        tCarrierMeshOrdinal = 0;
+    }
+    ~CarrierScope() {
+        tCarrier            = saved;
+        tCarrierMeshOrdinal = savedOrdinal;
+    }
     CarrierScope(CarrierScope const&)                  = delete;
     CarrierScope&       operator=(CarrierScope const&) = delete;
     ::BlockActor const* saved;
+    std::uint32_t       savedOrdinal;
 };
 
 using VisualSegment = Segment;
@@ -372,7 +390,9 @@ struct PistonVisual {
     // A truncated predecessor keeps drawing the arm until the new action's start tick.
     std::optional<VisualSegment> previous;
     // Tail of the push that carried this piston's body here, still playing when its own action starts.
-    std::optional<ActionVisual> bodyCarry;
+    core::PushPath bodyCarry;
+    double         headDelay{};
+    double         previousDelay{};
     // The body was pushed away while the arm still played; the arm went along and this entry no longer answers here.
     bool vacated{};
     // Last tick to search target cells, and the attached blocks copied on the piston's own thread for the renderer.
@@ -1974,8 +1994,9 @@ void probeGoneEnd(::BlockPos const& cell, uint64_t action, int64_t ticks, uint64
     );
 }
 
-char const* probeStateName(PushState state);
-float        armValue(PistonVisual const& visual, double time);
+char const*    probeStateName(PushState state);
+float          armValue(PistonVisual const& visual, double time);
+core::PushPath pushPathOf(PushCell const& rec, bool corner);
 
 // Called under gAnimMutex (then gProbeMutex). Only the first 200 replacements are logged.
 void probeCellReplaced(::BlockPos const& cell, uint64_t oldAction, PushState oldState, uint64_t newAction) {
@@ -2013,7 +2034,7 @@ void probeTailCarried(::BlockPos const& cell, ::BlockPos const& source, uint64_t
 // Under gAnimMutex then gProbeMutex. remain > 0: the mesh goes live before the proxy arrives. Logs the first 300.
 void probeMeshCommit(::BlockPos const& cell, PushCell const& rec, double step, double latencyFrames) {
     auto const                   speed   = core::worldSpeedSettings().applied.load(std::memory_order_relaxed);
-    auto const&                  segment = rec.visual.segment;
+    auto const&                  segment = rec.timeline.segment();
     auto const                   end     = static_cast<double>(segment.startTick) + segment.length;
     auto const                   remain  = end - gLastVisualTime.load(std::memory_order_relaxed) - step;
     static std::atomic<uint64_t> earlyLines{0};
@@ -2047,7 +2068,7 @@ void probeMeshCommit(::BlockPos const& cell, PushCell const& rec, double step, d
 // Called under gAnimMutex (then gProbeMutex) once a timeline accepted a re-mesh request.
 void probeRemeshRequest(::BlockPos const& cell, PushCell const& rec, int src) {
     if (gProbePerfOnly.load(std::memory_order_relaxed)) return;
-    auto const& segment = rec.visual.segment;
+    auto const& segment = rec.timeline.segment();
     auto const  remain =
         static_cast<double>(segment.startTick) + segment.length - gLastVisualTime.load(std::memory_order_relaxed);
     std::lock_guard const guard(gProbeMutex);
@@ -2917,8 +2938,10 @@ void probeFrameEnd() {
             if (cell.haveDrawer && cell.drawer == PushDrawer::Proxy
                 && (slowWorld ? gProbe.proxyEndSlowLines : gProbe.proxyEndLines).fetch_add(1, std::memory_order_relaxed)
                        < (slowWorld ? 800u : 100u)) {
-                auto const& segment = rec.visual.segment;
+                auto const& segment = rec.timeline.segment();
                 auto const  at      = gLastVisualTime.load(std::memory_order_relaxed);
+                auto const  nowVal  = rec.corner ? core::pushPathProgress(pushPathOf(rec, true), at)
+                                                 : core::segmentValue(rec.visual.segment, at);
                 probeLineLocked(
                     "proxyEnd cell=%d,%d,%d to=%s state=%s landed=%d left=%.3f t=%.3f start=%lld len=%.2f "
                     "speed=%.2f\n",
@@ -2928,7 +2951,7 @@ void probeFrameEnd() {
                     probeDrawerName(drawer),
                     probeStateName(state),
                     rec.timeline.landed() ? 1 : 0,
-                    static_cast<double>(std::fabs(core::segmentValue(segment, at) - segment.to)),
+                    static_cast<double>(std::fabs(nowVal - rec.visual.segment.to)),
                     at,
                     static_cast<long long>(segment.startTick),
                     segment.length,
@@ -3153,7 +3176,12 @@ void probeFrameEnd() {
                         return s.length > 0.0 ? std::fabs(static_cast<double>(s.to - s.from)) / s.length : 0.0;
                     };
                     double speed = rate(rec.visual.segment);
-                    if (rec.carry) speed += rate(rec.carry->visual.segment);
+                    if (rec.carry) {
+                        for (auto const& leg : rec.carried) speed += rate(leg.segment);
+                        if (rec.corner) {
+                            for (auto const& leg : pushPathOf(rec, true)) speed = std::max(speed, rate(leg.segment));
+                        }
+                    }
                     double const expected = speed * std::max(dt, 0.0);
                     auto const   magNow   = std::sqrt(
                         static_cast<double>(tally.vx) * tally.vx + static_cast<double>(tally.vy) * tally.vy
@@ -4094,8 +4122,8 @@ using core::segmentValue;
 
 // An interrupted predecessor keeps playing its remaining tail on top of the new action.
 float armValue(PistonVisual const& visual, double time) {
-    auto value = segmentValue(visual.current, time);
-    if (visual.previous) value += segmentValue(*visual.previous, time) - visual.previous->to;
+    auto value = segmentValue(visual.current, time - visual.headDelay);
+    if (visual.previous) value += segmentValue(*visual.previous, time - visual.previousDelay) - visual.previous->to;
     return std::clamp(value, 0.0f, 1.0f);
 }
 
@@ -4148,6 +4176,8 @@ void takeProxy(PushCell& rec, Graveyard& drop) {
     OPTIPISTON_PROBE_DO(gProbe.proxiesReleased.fetch_add(1, std::memory_order_relaxed);)
 }
 
+void clearCarriedLight();
+
 // Returns cells whose mesh is still missing the landed block.
 std::vector<::BlockPos> clearAnimationStateLocked(Graveyard& drop) {
     std::vector<::BlockPos> cells;
@@ -4173,6 +4203,7 @@ std::vector<::BlockPos> clearAnimationStateLocked(Graveyard& drop) {
     gMeshBuilder.clear();
     gMeshDirty = true;
     gCensus.clear();
+    clearCarriedLight();
     bumpLocked();
     settleLocked(drop);
     return cells;
@@ -4689,9 +4720,7 @@ void startAction(
         auto const&  settings = core::pistonSettings();
         PistonVisual visual{
             gNextAction++,
-            core::makeSegment(tick, 1.0f - to, to, settings.durationTicks.load()),
-            std::nullopt,
-            std::nullopt
+            core::makeSegment(tick, 1.0f - to, to, settings.durationTicks.load())
         };
         // The sweep that keeps the tick current is skipped while nothing is animating.
         gLastTick.store(now, std::memory_order_relaxed);
@@ -4709,12 +4738,15 @@ void startAction(
             // A piston cannot start the same direction twice, so this is a resent packet, not a new action.
             if (running && old.current.to == to) return;
             // Chain policy: the old action's remaining tail plays on top of the new one.
-            if (running) visual.previous = old.current;
+            if (running) {
+                visual.previous      = old.current;
+                visual.previousDelay = old.headDelay;
+            }
             endActionLocked(old.action);
         }
         // This piston's body may still be arriving from a push; its arm must follow that motion until it ends.
         if (auto const body = gCells.find(pistonPos); body != gCells.end() && !body->second.timeline.superseded())
-            visual.bodyCarry = body->second.visual;
+            visual.bodyCarry = pushPathOf(body->second, body->second.corner);
         gActionVisuals[visual.action] = {visual.current, facing};
         gPistonVisuals[pistonPos]     = visual;
         bumpLocked();
@@ -4738,16 +4770,19 @@ struct LazyTime {
 std::optional<float> armProgressIn(StateRef const& state, ::BlockPos const& pistonPos, LazyTime const& time) {
     auto const it = state.pistons.find(pistonPos);
     if (it == state.pistons.end() || it->second.vacated) return std::nullopt;
-    if (it->second.current.to > it->second.current.from) {
-        auto const action = state.actions.find(it->second.action);
-        if (action != state.actions.end()) {
-            auto const& facing = action->second.facing;
-            auto const  front  = state.cells.find(pistonPos + facing + facing);
-            if (front != state.cells.end() && front->second.action == it->second.action && front->second.corner
-                && !front->second.timeline.superseded()) {
-                // The head and front block use the same retimed push segment.
-                return core::pushPathProgress(pushPathOf(front->second, true), time.get());
-            }
+    if (auto const action = state.actions.find(it->second.action); action != state.actions.end()) {
+        auto const& facing    = action->second.facing;
+        bool const  extending = it->second.current.to > it->second.current.from;
+        auto const  frontPos  = extending ? pistonPos + facing + facing : pistonPos + facing;
+        auto const  front     = state.cells.find(frontPos);
+        if (front != state.cells.end() && front->second.action == it->second.action && front->second.corner
+            && !front->second.timeline.superseded()) {
+            // The head and front block use the same retimed push segment.
+            auto const t     = time.get();
+            auto       value = core::pushPathProgress(pushPathOf(front->second, true), t);
+            if (it->second.previous)
+                value += segmentValue(*it->second.previous, t - it->second.previousDelay) - it->second.previous->to;
+            return std::clamp(value, 0.0f, 1.0f);
         }
     }
     return armValue(it->second, time.get());
@@ -4755,8 +4790,9 @@ std::optional<float> armProgressIn(StateRef const& state, ::BlockPos const& pist
 
 std::optional<::Vec3> bodyOffsetIn(StateRef const& state, ::BlockPos const& pistonPos, LazyTime const& time) {
     auto const it = state.pistons.find(pistonPos);
-    if (it == state.pistons.end() || it->second.vacated || !it->second.bodyCarry) return std::nullopt;
-    return actionOffset(*it->second.bodyCarry, time.get());
+    if (it == state.pistons.end() || it->second.vacated || it->second.bodyCarry.empty()) return std::nullopt;
+    auto const offset = core::pushPathOffset(it->second.bodyCarry, time.get());
+    return ::Vec3{offset[0], offset[1], offset[2]};
 }
 
 std::optional<::Vec3>
@@ -5049,7 +5085,7 @@ void moveArmLocked(::BlockPos const& from, ::BlockPos const& to, std::string con
     PistonVisual moved = src->second;
     moved.attached.reset();
     moved.scanUntil = 0;
-    moved.bodyCarry.reset();
+    moved.bodyCarry.clear();
     src->second.vacated = true;
     OPTIPISTON_PROBE_DO(probeArmMoved(from, to, moved.action);)
     gPistonVisuals.insert_or_assign(to, std::move(moved));
@@ -5132,7 +5168,29 @@ void commitProxyLocked(NewProxy& made, Graveyard& drop) {
         forgetCellLocked(made.cell, replaced->second);
         gCells.erase(replaced);
     }
-    rec.timeline.start(made.action, made.visual.segment, made.carriesActor);
+    auto timelineVisual = made.visual.segment;
+    if (rec.corner) {
+        auto const path  = pushPathOf(rec, true);
+        auto const delay = path.back().delay;
+        if (delay > 0.0) {
+            timelineVisual.length      += delay;
+            timelineVisual.lifetime     = std::max(timelineVisual.lifetime, timelineVisual.length);
+            rec.visual.segment.lifetime = std::max(rec.visual.segment.lifetime, timelineVisual.lifetime);
+            if (auto const act = gActionVisuals.find(made.action); act != gActionVisuals.end()) {
+                act->second.segment.lifetime = std::max(act->second.segment.lifetime, timelineVisual.lifetime);
+            }
+            if (auto const piston = gPistonVisuals.find(made.pistonPos);
+                piston != gPistonVisuals.end() && piston->second.action == made.action) {
+                piston->second.current.lifetime =
+                    std::max(piston->second.current.lifetime, timelineVisual.lifetime);
+                bool const extending = made.visual.segment.to > made.visual.segment.from;
+                auto const frontPos  = extending ? made.pistonPos + made.visual.facing + made.visual.facing
+                                                 : made.pistonPos + made.visual.facing;
+                if (made.cell == frontPos) piston->second.headDelay = delay;
+            }
+        }
+    }
+    rec.timeline.start(made.action, timelineVisual, made.carriesActor);
     rec.proxy = std::move(made.proxy);
     // A replay can place the real block before its MovingBlock is first drawn, with no landing packet.
     if (made.placed) rec.timeline.blockLanded();
@@ -5566,7 +5624,7 @@ void noteCameraDispatch(::BlockActor const& actor, ::mce::MaterialPtr const& for
 // Draws the proxies whose timeline says they are the drawer. Runs right after the camera drew its queues.
 void drawProxies(::BaseActorRenderContext& context, bool renderAlphaLayer, ::Vec3 const& camera) {
     OPTIPISTON_PERF_SCOPE(perf, RenderBlockEntities);
-    if (!gStateWatch.load(std::memory_order_relaxed)) return;
+    if (!smoothPistonRenderEnabled() || !gStateWatch.load(std::memory_order_relaxed)) return;
     // A reused buffer of cells from the view, which the pin keeps alive for the whole draw.
     thread_local std::vector<PushCell const*> drawList;
     ViewPin                                   pin;
@@ -5946,14 +6004,15 @@ void drawMoving(::BaseActorRenderContext&, ::BlockSource& source, ::BlockActor& 
     bool const isMoving  = entity.mType == ::BlockActorType::MovingBlock;
     auto*      movingPtr = isMoving ? static_cast<::MovingBlockActor*>(&entity) : nullptr;
 
-    RenderScope const  scope;
-    CarrierScope const carrier(&entity);
-
     if (!smoothPistonRenderEnabled() || !isMoving) {
         OPTIPISTON_PROBE_DO(perf.pause();)
         draw();
         return;
     }
+
+    RenderScope const  scope;
+    CarrierScope const carrier(&entity);
+
     if (&entity != tProxyDraw && !inPistonRange(entity.mPosition.get()) && !isTrackedMoving(*movingPtr)) {
         OPTIPISTON_PROBE_DO(perf.pause();)
         draw();
@@ -6017,6 +6076,148 @@ void drawMoving(::BaseActorRenderContext&, ::BlockSource& source, ::BlockActor& 
     draw();
 }
 
+#if OPTIPISTON_MC >= 2620
+static_assert(offsetof(::MovingBlockActorRenderer, mBlockTessellator) == 0xB8);
+#endif
+static_assert(offsetof(::BlockTessellator, mLightingModelCapabilities) == 0x10);
+
+thread_local bool tInMovingBlockRender = false;
+thread_local bool tRtxMovingMeshBuild  = false;
+
+struct MovingBlockRenderScope {
+    bool prev{};
+
+    explicit MovingBlockRenderScope(bool enable) noexcept : prev(tInMovingBlockRender) {
+        if (enable) tInMovingBlockRender = true;
+    }
+
+    ~MovingBlockRenderScope() noexcept { tInMovingBlockRender = prev; }
+
+    MovingBlockRenderScope(MovingBlockRenderScope const&)            = delete;
+    MovingBlockRenderScope& operator=(MovingBlockRenderScope const&) = delete;
+};
+
+struct RtxMovingMeshBuildScope {
+    bool prev{};
+
+    explicit RtxMovingMeshBuildScope(bool enable) noexcept : prev(tRtxMovingMeshBuild) {
+        if (enable) tRtxMovingMeshBuild = true;
+    }
+
+    ~RtxMovingMeshBuildScope() noexcept { tRtxMovingMeshBuild = prev; }
+
+    RtxMovingMeshBuildScope(RtxMovingMeshBuildScope const&)            = delete;
+    RtxMovingMeshBuildScope& operator=(RtxMovingMeshBuildScope const&) = delete;
+};
+
+struct BlockTessellatorPbrScope {
+    std::uint8_t* ptr{};
+    std::uint8_t  orig{};
+    bool          active{};
+
+    explicit BlockTessellatorPbrScope(::BlockTessellator* bt, bool enable) noexcept {
+        if (enable && bt) {
+            ptr    = reinterpret_cast<std::uint8_t*>(&bt->mLightingModelCapabilities) + 6;
+            orig   = *ptr;
+            *ptr   = 1u;
+            active = true;
+        }
+    }
+
+    ~BlockTessellatorPbrScope() noexcept {
+        if (active && ptr) *ptr = orig;
+    }
+
+    BlockTessellatorPbrScope(BlockTessellatorPbrScope const&)            = delete;
+    BlockTessellatorPbrScope& operator=(BlockTessellatorPbrScope const&) = delete;
+};
+
+struct BakedLightingFlatScope {
+    ::BlockTessellator*   bt{};
+    ::BakedBlockLightType orig{};
+    bool                  active{};
+
+    explicit BakedLightingFlatScope(::BlockTessellator* tess, bool enable) noexcept : bt(tess) {
+        if (enable && bt) {
+            orig               = bt->mBakedLighting;
+            bt->mBakedLighting = ::BakedBlockLightType::Flat;
+            active             = true;
+        }
+    }
+
+    ~BakedLightingFlatScope() noexcept {
+        if (active && bt) bt->mBakedLighting = orig;
+    }
+
+    BakedLightingFlatScope(BakedLightingFlatScope const&)            = delete;
+    BakedLightingFlatScope& operator=(BakedLightingFlatScope const&) = delete;
+};
+
+std::mutex                      gRtxMovingMeshesMutex;
+std::unordered_set<void const*> gRtxMovingMeshes;
+
+void recordRtxMovingMesh(void const* mesh) {
+    if (!mesh) return;
+    std::lock_guard const guard(gRtxMovingMeshesMutex);
+    if (gRtxMovingMeshes.size() >= 4096) gRtxMovingMeshes.clear();
+    gRtxMovingMeshes.insert(mesh);
+}
+
+bool consumeRtxMovingMesh(void const* mesh) {
+    if (!mesh) return false;
+    std::lock_guard const guard(gRtxMovingMeshesMutex);
+    return gRtxMovingMeshes.erase(mesh) > 0;
+}
+
+void clearRtxMovingMeshes() {
+    std::lock_guard const guard(gRtxMovingMeshesMutex);
+    gRtxMovingMeshes.clear();
+}
+
+struct InWorldMeshNonNothrowHash {
+    std::size_t operator()(::BlockTessellatorBlockInWorld const&) const noexcept(false) { return 0; }
+};
+
+struct InWorldMeshDummyEq {
+    bool operator()(::BlockTessellatorBlockInWorld const&, ::BlockTessellatorBlockInWorld const&) const {
+        return false;
+    }
+};
+
+using InWorldMeshMap =
+    std::unordered_map<::BlockTessellatorBlockInWorld, ::mce::Mesh, InWorldMeshNonNothrowHash, InWorldMeshDummyEq>;
+
+std::mutex                                                                     gInWorldMeshCacheStateMutex;
+std::unordered_map<::BlockTessellator const*, std::pair<std::uint32_t, bool>> gInWorldMeshCacheState;
+
+void syncInWorldMeshCache(::BlockTessellator& bt, std::uint32_t lm, bool rtxMovingActive) {
+    bool needClear = false;
+    {
+        std::lock_guard const guard(gInWorldMeshCacheStateMutex);
+        auto const            key = std::pair{lm, rtxMovingActive};
+        auto const            it  = gInWorldMeshCacheState.find(&bt);
+        if (it == gInWorldMeshCacheState.end()) {
+            if (gInWorldMeshCacheState.size() >= 64) gInWorldMeshCacheState.clear();
+            gInWorldMeshCacheState.emplace(&bt, key);
+        } else if (it->second != key) {
+            it->second = key;
+            needClear  = true;
+        }
+    }
+    if (needClear) {
+        // SDK omits the private hasher/eq on mInWorldBlockMeshes; non-noexcept hash keeps clear() on bulk reset.
+        static_assert(sizeof(InWorldMeshMap) == sizeof(bt.mInWorldBlockMeshes));
+        static_assert(alignof(InWorldMeshMap) == alignof(decltype(bt.mInWorldBlockMeshes)));
+        reinterpret_cast<InWorldMeshMap*>(&bt.mInWorldBlockMeshes)->clear();
+        clearRtxMovingMeshes();
+    }
+}
+
+void clearInWorldMeshCacheState() {
+    std::lock_guard const guard(gInWorldMeshCacheStateMutex);
+    gInWorldMeshCacheState.clear();
+}
+
 #if OPTIPISTON_MC == 2610
 // Neither renderer exports its render here, so both are intercepted where the dispatcher hands them the actor.
 LL_TYPE_INSTANCE_HOOK(
@@ -6072,10 +6273,16 @@ LL_TYPE_INSTANCE_HOOK(
         noteCameraDispatch(e, forcedMat);
     }
     // The arm renderer this replaces only ever covered the opaque pass; a moving block can be drawn in either.
-    if (e.mType == ::BlockActorType::MovingBlock) drawMoving(entityRenderContext, renderSource, e, draw);
-    else if (renderAlphaLayer) draw();
-    else if (e.mType == ::BlockActorType::PistonArm) drawArm(entityRenderContext, renderSource, e, position, draw);
-    else draw();
+    if (e.mType == ::BlockActorType::MovingBlock) {
+        MovingBlockRenderScope const movingRenderScope(smoothPistonRenderEnabled() && movingBlockLightingEnabled());
+        drawMoving(entityRenderContext, renderSource, e, draw);
+    } else if (renderAlphaLayer) {
+        draw();
+    } else if (e.mType == ::BlockActorType::PistonArm) {
+        drawArm(entityRenderContext, renderSource, e, position, draw);
+    } else {
+        draw();
+    }
 }
 #else
 ::BlockActor& renderedActor(::BlockActorRenderData& data) {
@@ -6102,24 +6309,6 @@ LL_TYPE_INSTANCE_HOOK(
     });
 }
 
-// moving_block_blend writes depth, so translucent terrain drawn after a gliding glass vanishes behind it.
-void relaxMovingBlendDepth(::MovingBlockActorRenderer& renderer) {
-    thread_local uint32_t calls = 0;
-    if ((calls++ & 255u) != 0) return;
-    for (auto& slot : renderer.mBlockMaterials) {
-        auto const* const info = slot.get().mRenderMaterialInfoPtr.get();
-        auto* const       mat  = info ? info->mPtr.get() : nullptr;
-        if (!mat || !mat->blendStateDescription.get().enableBlend) continue;
-        auto& mask = mat->depthStencilStateDescription.get().depthWriteMask;
-        if (static_cast<int>(mask) == 0) continue;
-        mask = static_cast<::mce::DepthWriteMask>(0);
-        OPTIPISTON_PROBE_DO(
-            std::lock_guard const guard(gProbeMutex);
-            probeLineLocked("materialRelaxed name=%s\n", info->mHashedName.get().c_str());
-        )
-    }
-}
-
 LL_TYPE_INSTANCE_HOOK(
     OptiPistonMovingBlockGhostHook,
     ll::memory::HookPriority::Normal,
@@ -6129,8 +6318,8 @@ LL_TYPE_INSTANCE_HOOK(
     ::BaseActorRenderContext& renderContext,
     ::BlockActorRenderData&   blockEntityRenderData
 ) {
-    relaxMovingBlendDepth(*this);
     OPTIPISTON_PROBE_DO(probeMovingMaterials(*this);)
+    MovingBlockRenderScope const movingRenderScope(smoothPistonRenderEnabled() && movingBlockLightingEnabled());
     drawMoving(renderContext, blockEntityRenderData.renderSource, renderedActor(blockEntityRenderData), [&] {
         origin(renderContext, blockEntityRenderData);
     });
@@ -6333,6 +6522,7 @@ LL_TYPE_INSTANCE_HOOK(
     bool                            useSplitStream
 ) {
     OPTIPISTON_PROBE_DO(tProbeCommitChain = probeCallChain(); tProbeCommitBuilder = &builder;)
+    bool const preEmpty = optipiston::subchunk_detail::isBuiltMeshEmptyOrInvalid(builder, isBuilding);
     origin(
         builder,
         bufferResourceService,
@@ -6341,6 +6531,7 @@ LL_TYPE_INSTANCE_HOOK(
         renderMetadata,
         useSplitStream
     );
+    optipiston::subchunk_detail::finalizeEmptyRebuildIfNeeded(*this, isBuilding, preEmpty);
     tMeshGeometry = nullptr;
     meshBuildCommitted(this);
 }
@@ -6353,6 +6544,7 @@ LL_TYPE_INSTANCE_HOOK(
     void
 ) {
     origin();
+    optipiston::subchunk_detail::evictStaleInstancedIfSharedEmpty(*this);
     if (!gStagedWatch.load(std::memory_order_relaxed)) return;
     auto const* shown = mCurrentRenderChunkGeometry.get();
     if (shown == nullptr) return;
@@ -6373,10 +6565,45 @@ LL_TYPE_INSTANCE_HOOK(
     bool                            useSplitStream
 ) {
     OPTIPISTON_PROBE_DO(tProbeCommitChain = probeCallChain(); tProbeCommitBuilder = &builder;)
+#if OPTIPISTON_MC >= 2620
+    bool const preEmpty = smoothPistonRenderEnabled()
+                            ? optipiston::subchunk_detail::isBuiltMeshEmptyOrInvalid(builder, isBuilding)
+                            : false;
+#endif
     origin(builder, bufferResourceService, isBuilding, renderMetadata, useSplitStream);
+#if OPTIPISTON_MC >= 2620
+    if (smoothPistonRenderEnabled()) {
+        optipiston::subchunk_detail::finalizeEmptyRebuildIfNeeded(*this, isBuilding, preEmpty);
+    }
+#endif
     tMeshGeometry = nullptr;
     meshBuildCommitted(this);
 }
+
+#if OPTIPISTON_MC >= 2620
+#if OPTIPISTON_MC == 2620
+#define OPTIPISTON_PROMOTE_SIG                                                                                         \
+    "56 57 53 48 83 EC 40 48 8B 05 ?? ?? ?? ?? 48 31 E0 48 89 44 24 38 0F B6 41 09 3C 01"_sig
+#else
+#define OPTIPISTON_PROMOTE_SIG                                                                                         \
+    "56 57 53 48 83 EC 30 48 8B 05 ?? ?? ?? ?? 48 31 E0 48 89 44 24 28 0F B6 41 09 3C 01"_sig
+#endif
+struct PromoteHookTag {};
+
+LL_TYPE_STATIC_HOOK(
+    OptiPistonPromoteHook,
+    ll::memory::HookPriority::Normal,
+    PromoteHookTag,
+    OPTIPISTON_PROMOTE_SIG,
+    void,
+    void* instanced
+) {
+    origin(instanced);
+    if (smoothPistonRenderEnabled()) {
+        optipiston::subchunk_detail::evictStaleInstancedIfSharedEmpty(instanced);
+    }
+}
+#endif
 #endif
 
 // Passes without block actors (export) do not count, so "next frame" always means a frame that drew them.
@@ -6775,12 +7002,23 @@ struct LightRet {
 
 using LightColorFn = LightRet (::BlockSource::*)(::BlockPos const&, std::uint8_t) const;
 
+inline LightColorFn getLightColorFn() noexcept {
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcast-function-type-mismatch"
+#endif
+    return reinterpret_cast<LightColorFn>(&::BlockSource::getLightColor);
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
+}
+
 // Outside an ArmLightFixScope window this costs one thread-local read.
 LL_TYPE_INSTANCE_HOOK(
     OptiPistonLightColorHook,
     ll::memory::HookPriority::Normal,
     ::BlockSource,
-    reinterpret_cast<LightColorFn>(&::BlockSource::getLightColor),
+    getLightColorFn(),
     LightRet,
     ::BlockPos const& pos,
     std::uint8_t      minBlockLight
@@ -6874,7 +7112,7 @@ void fixTileLightIntensity(::ScreenContext& screenContext, ::BlockSource& source
                       + (fix.camera.z - fix.cell.z - 0.5f) * n[2];
         if (w <= 0) continue;
         ::BlockPos const front{fix.cell.x + n[0], fix.cell.y + n[1], fix.cell.z + n[2]};
-        auto const       light = (source.*reinterpret_cast<LightColorFn>(&::BlockSource::getLightColor))(front, 0).v;
+        auto const       light = (source.*getLightColorFn())(front, 0).v;
         // An opaque cell stores 0/0 and hides that face.
         if (light == 0) continue;
         weight += w;
@@ -6925,12 +7163,23 @@ using ShaderLightHookFn = void (*)(
     ::Vec4 const&
 );
 
+inline ShaderLightHookFn getShaderLightHookFn() noexcept {
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcast-function-type-mismatch"
+#endif
+    return reinterpret_cast<ShaderLightHookFn>(static_cast<ShaderLightFn>(&::ActorShaderManager::setupShaderParameters));
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
+}
+
 // A block actor's light on its way to the shader: 26.10 applies the arm fixes to it, and every line relights a proxy.
 LL_TYPE_STATIC_HOOK(
     OptiPistonShaderLightHook,
     ll::memory::HookPriority::Normal,
     ::ActorShaderManager,
-    reinterpret_cast<ShaderLightHookFn>(static_cast<ShaderLightFn>(&::ActorShaderManager::setupShaderParameters)),
+    getShaderLightHookFn(),
     void,
     ::ScreenContext&   screenContext,
     ::BlockSource&     source,
@@ -6947,7 +7196,7 @@ LL_TYPE_STATIC_HOOK(
     auto const& fix = tArmLightFix;
     if (fix.active) {
         if (light.v == 0)
-            light = (source.*reinterpret_cast<LightColorFn>(&::BlockSource::getLightColor))(fix.piston, 0);
+            light = (source.*getLightColorFn())(fix.piston, 0);
         OPTIPISTON_PROBE_DO(gLightFixHeadQueries.fetch_add(1, std::memory_order_relaxed);
                             if (lightColorUV.v == 0) gLightFixRawDark.fetch_add(1, std::memory_order_relaxed);
                             if (light.v != lightColorUV.v) gLightFixRewrites.fetch_add(1, std::memory_order_relaxed);)
@@ -6965,11 +7214,9 @@ LL_TYPE_STATIC_HOOK(
     }
 #endif
     origin(screenContext, source, light, blockLightColor, a, ignoreLighting, lightTexture, uvScale, uvAnim);
-    if (tProxyLightFix.active && !ignoreLighting && movingBlockLightingEnabled())
+    if (tProxyLightFix.active && !ignoreLighting && smoothPistonRenderEnabled() && movingBlockLightingEnabled())
         fixTileLightIntensity(screenContext, source);
 }
-
-using ll::memory_literals::operator""_sig;
 
 #if OPTIPISTON_MC == 2610
 constexpr std::array kColorForUVSigs{
@@ -7035,7 +7282,9 @@ LL_TYPE_INSTANCE_HOOK(
     ::mce::Color,
     ::glm::vec2 const& uv
 ) {
-    if (!tProxyLightFix.active || !movingBlockLightingEnabled()) return origin(uv);
+    if (!smoothPistonRenderEnabled() || !movingBlockLightingEnabled()) return origin(uv);
+    if (tRtxMovingMeshBuild) return ::mce::Color{1.0f, 1.0f, 1.0f, 1.0f};
+    if (!tProxyLightFix.active) return origin(uv);
     // Just short of the last texel: the lookup snaps anything at or past it back by one texel.
     constexpr float kTopTexel = 0.96874f;
     auto const      scaled    = uv * (16.0f / 15.0f);
@@ -7053,6 +7302,11 @@ struct CarriedLight {
 std::mutex                                                 gCarriedLightMutex;
 std::unordered_map<::BlockPos, CarriedLight, BlockPosHash> gCarriedLight; // guarded by gCarriedLightMutex
 std::atomic<::Block const*>                                gMovingBlock{nullptr};
+
+void clearCarriedLight() {
+    std::lock_guard const guard(gCarriedLightMutex);
+    gCarriedLight.clear();
+}
 // The relighter of the client subchunk this thread is relighting.
 thread_local ::SubChunkRelighter const* tClientRelighter = nullptr;
 
@@ -7133,7 +7387,9 @@ std::atomic<GetElementFn> gGetElementOrigin[kStorageKinds]{};
 template <std::size_t I>
 ::Block const& carriedLightGetElement(void const* storage, std::uint16_t index) {
     auto const& block = gGetElementOrigin[I].load(std::memory_order_relaxed)(storage, index);
-    if (&block != gMovingBlock.load(std::memory_order_relaxed) || !movingBlockLightingEnabled()) return block;
+    if (&block != gMovingBlock.load(std::memory_order_relaxed) || !smoothPistonRenderEnabled()
+        || !movingBlockLightingEnabled())
+        return block;
     ::Block const* carried = nullptr;
     if (auto const* relighter = tClientRelighter) carried = carriedLightBlock(*relighter, storage, index);
     else if (std::ranges::find(gVibrantLightScans, reinterpret_cast<std::uintptr_t>(LL_RETURN_ADDRESS))
@@ -7191,7 +7447,7 @@ LL_TYPE_INSTANCE_HOOK(
     std::vector<::SubChunkLightUpdate> const& alteredBlockList,
     std::vector<::BlockPos>&                  brightnessChangedList
 ) {
-    if (!levelChunk.mLevel.isClientSide() || !movingBlockLightingEnabled()) {
+    if (!levelChunk.mLevel.isClientSide() || !smoothPistonRenderEnabled() || !movingBlockLightingEnabled()) {
         origin(levelChunk, alteredBlockList, brightnessChangedList);
         return;
     }
@@ -7205,14 +7461,13 @@ LL_TYPE_INSTANCE_HOOK(
 
 // The client learns what a moving block carries from its data, after the cell was already relit as a moving block.
 void noteCarriedLight(::MovingBlockActor const& moving, ::BlockSource& region) {
-    if (!movingBlockLightingEnabled()) {
-        std::lock_guard const guard(gCarriedLightMutex);
-        gCarriedLight.clear();
+    if (!smoothPistonRenderEnabled() || !movingBlockLightingEnabled() || !animationActive()) {
+        clearCarriedLight();
         return;
     }
     auto const pos = moving.mPosition.get();
     refreshPlayerOrigin();
-    if (!inPistonRange(pos) && !inPistonRange(moving.mPistonBlockPos.get())) {
+    if (!inPistonRange(pos) || wrappedName(moving).find("piston") != std::string_view::npos) {
         std::lock_guard const guard(gCarriedLightMutex);
         gCarriedLight.erase(pos);
         return;
@@ -7307,8 +7562,7 @@ void removeCarriedLight(bool& relightInstalled, bool& noteInstalled) {
     unpatchOnUpdatePacket();
 #endif
     unpatchStorages();
-    std::lock_guard const guard(gCarriedLightMutex);
-    gCarriedLight.clear();
+    clearCarriedLight();
 }
 
 void installCarriedLight(bool& relightInstalled, bool& noteInstalled) {
@@ -7318,7 +7572,687 @@ void installCarriedLight(bool& relightInstalled, bool& noteInstalled) {
         removeCarriedLight(relightInstalled, noteInstalled);
 }
 
-bool gLightFixInstalled[5]{};
+// ---- True Ray Tracing (RTX) moving-block BLAS + terrain-atlas PBR promotion ----
+
+struct RtxMovingBlockLayout {
+    bool          descFromVariant;
+    bool          hasResVtable;
+    std::size_t   setRtVtableLeaOffset;
+    std::size_t   ctxVariantOffset;
+    std::size_t   descMeshPtrOffset;
+    std::size_t   descAtlasPtrOffset;
+    std::size_t   descHasAtlasOffset;
+    std::size_t   descIsDrawingMovingBlockOffset;
+    std::size_t   descMaterialPtrOffset;
+    std::size_t   sceneObjRtSlotOffset;
+    std::size_t   srcRasterPassOffset;
+    std::size_t   srcHasRaytraceObjOffset;
+    std::size_t   srcGeomClass2Offset;
+    std::size_t   srcGeomClass1Offset;
+    std::size_t   srcRaytraceWorldPassOffset;
+    std::uint16_t terrainPbrBaseFlags;
+};
+
+#if OPTIPISTON_MC == 2610
+constexpr RtxMovingBlockLayout kRtxLayout{
+    false, true, 38, 112, 0, 16, 200, 288, 328, 136, 121, 264, 305, 313, 385, 0x0101u
+};
+#define OPTIPISTON_RTX_INSERT_SIG                                                                                      \
+    "48 89 5C 24 20 55 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 D0 F9 FF FF 48 81 EC 30 07 00 00 48 8B 05 ?? ?? ?? "  \
+    "?? 48 33 C4 48 89 85 20 06 00 00 49 8B F0"_sig
+#define OPTIPISTON_RTX_SUBMIT_SIG                                                                                      \
+    "48 89 5C 24 08 55 48 8D AC 24 20 FD FF FF 48 81 EC 60 04 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4"_sig
+#define OPTIPISTON_RTX_CREATE_BVH_SIG                                                                                  \
+    "48 89 5C 24 08 48 89 54 24 10 55 56 57 41 54 41 55 41 56 41 57 48 83 EC 60 45 8B E1 49 8B D8"_sig
+#define OPTIPISTON_RTX_SET_RT_SIG                                                                                      \
+    "48 89 5C 24 08 48 89 74 24 10 57 48 81 EC 00 01 00 00 48 8B F1 0F 57 C0 0F 11 44 24 68 0F 57 C9 F3 0F 7F 4C 24 "  \
+    "70 48 8D 0D ?? ?? ?? ?? 48 89 4C 24 68 0F 11 44 24 50 F3 0F 7F 4C 24 58 48 89 4C 24 50 C7 44 24 48 00 FF FF FF "  \
+    "C7 44 24 40 00 FF FF FF 48 8D 44 24 68 48 89 44 24 38 48 8D 44 24 50 48 89 44 24 30 48 8B 84 24 38 01 00 00 0F "  \
+    "B7 08 66 89 4C 24 28 48 8B 84 24 30 01 00 00 48 89 44 24 20 4D 8B 09 45 0F B6 00 48 8D 8C 24 80 00 00 00 E8 ?? "  \
+    "?? ?? ?? 48 8D 8E 88 00 00 00"_sig
+#define OPTIPISTON_RTX_BUILD_2TEX_SIG                                                                                  \
+    "48 89 5C 24 10 48 89 74 24 18 48 89 4C 24 08 57 48 83 EC 30 48 8B D9 48"_sig
+#define OPTIPISTON_RTX_ATTACH_RT_SIG                                                                                   \
+    "48 89 5C 24 08 57 48 83 EC 30 48 8B FA 48 8B D9 80 B9 80 00 00 00 00"_sig
+#elif OPTIPISTON_MC == 2620
+constexpr RtxMovingBlockLayout kRtxLayout{
+    false, true, 65, 112, 0, 16, 200, 287, 328, 128, 113, 256, 297, 305, 369, 0x0101u
+};
+#define OPTIPISTON_RTX_INSERT_SIG                                                                                      \
+    "55 41 57 41 56 41 55 41 54 56 57 53 48 81 EC F8 05 00 00 48 8D AC 24 80 00 00 00 48 C7 85 70 05 00 00 FE FF FF "  \
+    "FF 4C 89 C7"_sig
+#define OPTIPISTON_RTX_SUBMIT_SIG                                                                                      \
+    "55 41 57 41 56 41 55 41 54 56 57 53 48 81 EC 28 04 00 00 48 8D AC 24 80 00 00 00 48 C7 85 A0 03 00 00 FE FF FF "  \
+    "FF 48 89 CE"_sig
+#define OPTIPISTON_RTX_CREATE_BVH_SIG                                                                                  \
+    "55 41 57 41 56 41 55 41 54 56 57 53 48 83 EC 68 48 8D 6C 24 60 48 C7 45 00 FE FF FF FF 4D 8B B0 98 01 00 00 4D "  \
+    "85 F6 0F 84 ?? ?? ?? ?? 44 89 CF 4D 89 C7 48 89 D3 48 89 CE 8B 05 ?? ?? ?? ?? 8B 0D ?? ?? ?? ?? 65 48 8B 14 25 "  \
+    "58 00 00 00 48 8B 0C CA 3B 81 18 15 00 00 0F 8F ?? ?? ?? ?? 66 F0 41 FF 46 10 41 F6 46 12 01 0F 84 ?? ?? ?? ?? "  \
+    "0F 57 C0 0F 11 45 E0"_sig
+#define OPTIPISTON_RTX_SET_RT_SIG                                                                                      \
+    "56 57 53 48 81 EC 10 01 00 00 48 89 CE 48 8B 84 24 50 01 00 00 48 8B 8C 24 58 01 00 00 4C 8B 15 ?? ?? ?? ?? 49 "  \
+    "31 E2 4C 89 94 24 08 01 00 00 45 0F B6 00 4D 8B 09 0F B7 09 0F 57 C0 0F 11 44 24 78 4C 8D 15 ?? ?? ?? ?? 4C 89 "  \
+    "54 24 70 0F 11 44 24 60 4C 89 54 24 58 4C 8D 54 24 58 4C 89 54 24 38 4C 8D 54 24 70 4C 89 54 24 30 66 89 4C 24 "  \
+    "28 48 89 44 24 20 C7 44 24 48 00 FF FF FF C7 44 24 40 00 FF FF FF 48 8D BC 24 88 00 00 00 48 89 F9 E8 ?? ?? ?? "  \
+    "?? 48 8D 8E 80 00 00 00"_sig
+#define OPTIPISTON_RTX_BUILD_2TEX_SIG                                                                                  \
+    "41 56 56 57 55 53 48 83 EC 20 48 89 CE 0F B7 4C 24 78 48 8B 44 24 70 4C"_sig
+#define OPTIPISTON_RTX_ATTACH_RT_SIG                                                                                   \
+    "80 B9 80 00 00 00 01 0F 84 ?? ?? ?? ?? 48 8D 05 ?? ?? ?? ?? 48 89 01 0F 57 C0 0F 11 41 08 48 8B 42 10"_sig
+#elif OPTIPISTON_MC == 2632
+constexpr RtxMovingBlockLayout kRtxLayout{
+    true, true, 65, 112, 0, 16, 200, 287, 328, 120, 105, 248, 289, 297, 361, 0x8101u
+};
+#define OPTIPISTON_RTX_INSERT_SIG                                                                                      \
+    "55 41 57 41 56 41 55 41 54 56 57 53 48 81 EC 58 0A 00 00 48 8D AC 24 80 00 00 00 44 0F 29 BD C0 09 00 00"_sig
+#define OPTIPISTON_RTX_SUBMIT_SIG                                                                                      \
+    "55 41 57 41 56 41 55 41 54 56 57 53 48 81 EC 58 04 00 00 48 8D AC 24 80 00 00 00 48 C7 85 D0 03 00 00 FE FF FF "  \
+    "FF 49 89 CA"_sig
+#define OPTIPISTON_RTX_CREATE_BVH_SIG                                                                                  \
+    "55 41 57 41 56 41 54 56 57 53 48 83 EC 70 48 8D 6C 24 70 48 C7 45 F8 FE FF FF FF 49 8B B0 98 01 00 00"_sig
+#define OPTIPISTON_RTX_SET_RT_SIG                                                                                      \
+    "56 57 53 48 81 EC 10 01 00 00 48 89 CE 48 8B 84 24 50 01 00 00 48 8B 8C 24 58 01 00 00"_sig
+#define OPTIPISTON_RTX_BUILD_2TEX_SIG                                                                                  \
+    "41 56 56 57 55 53 48 83 EC 20 48 89 CE 0F B7 4C 24 78 48 8B 44 24 70 4C"_sig
+#define OPTIPISTON_RTX_ATTACH_RT_SIG                                                                                   \
+    "56 57 53 48 83 EC 20 48 89 D7 48 89 CE 80 B9 80 00 00 00 01 75 1A 48 8B 47 10 48 85"_sig
+#elif OPTIPISTON_MC == 2640
+constexpr RtxMovingBlockLayout kRtxLayout{
+    true, true, 65, 112, 0, 16, 200, 287, 328, 120, 105, 248, 289, 297, 361, 0x8101u
+};
+#define OPTIPISTON_RTX_INSERT_SIG                                                                                      \
+    "55 41 57 41 56 41 55 41 54 56 57 53 48 81 EC 88 0A 00 00 48 8D AC 24 80 00 00 00 44 0F 29 BD F0 09 00 00 44 0F "  \
+    "29 B5 E0 09 00 00 44 0F 29 AD D0 09 00 00 44 0F 29 A5 C0 09 00 00 44 0F 29 9D B0 09 00 00"_sig
+#define OPTIPISTON_RTX_SUBMIT_SIG                                                                                      \
+    "55 41 57 41 56 41 55 41 54 56 57 53 48 81 EC 78 04 00 00 48 8D AC 24 80 00 00 00 48 C7 85 F0 03 00 00 FE FF FF "  \
+    "FF 49 89 CA"_sig
+#define OPTIPISTON_RTX_CREATE_BVH_SIG                                                                                  \
+    "55 41 57 41 56 41 54 56 57 53 48 83 EC 70 48 8D 6C 24 70 48 C7 45 F8 FE FF FF FF 49 8B B0 B0 01 00 00"_sig
+#define OPTIPISTON_RTX_SET_RT_SIG                                                                                      \
+    "56 57 53 48 81 EC 10 01 00 00 48 89 CE 48 8B 84 24 50 01 00 00 48 8B 8C 24 58 01 00 00"_sig
+#define OPTIPISTON_RTX_BUILD_2TEX_SIG                                                                                  \
+    "41 56 56 57 55 53 48 83 EC 20 48 89 CE 0F B7 4C 24 78 48 8B 44 24 70 4C"_sig
+#define OPTIPISTON_RTX_ATTACH_RT_SIG                                                                                   \
+    "56 57 53 48 83 EC 20 48 89 D7 48 89 CE 80 B9 80 00 00 00 01 75 1A 48 8B 47 10 48 85"_sig
+#elif OPTIPISTON_MC == 2651
+constexpr RtxMovingBlockLayout kRtxLayout{
+    true, true, 65, 112, 0, 16, 200, 287, 328, 120, 105, 248, 289, 297, 361, 0x8101u
+};
+#define OPTIPISTON_RTX_INSERT_SIG                                                                                      \
+    "55 41 57 41 56 41 55 41 54 56 57 53 48 81 EC 28 0A 00 00 48 8D AC 24 80 00 00 00 44 0F 29 BD 90 09 00 00"_sig
+#define OPTIPISTON_RTX_SUBMIT_SIG                                                                                      \
+    "55 41 57 41 56 41 55 41 54 56 57 53 48 81 EC 88 04 00 00 48 8D AC 24 80 00 00 00 48 C7 85 00 04 00 00 FE FF FF "  \
+    "FF 49 89 CA"_sig
+#define OPTIPISTON_RTX_CREATE_BVH_SIG                                                                                  \
+    "55 41 57 41 56 41 54 56 57 53 48 83 EC 70 48 8D 6C 24 70 48 C7 45 F8 FE FF FF FF 49 8B B0 C0 01 00 00"_sig
+#define OPTIPISTON_RTX_SET_RT_SIG                                                                                      \
+    "56 57 53 48 81 EC 10 01 00 00 48 89 CE 48 8B 84 24 50 01 00 00 48 8B 8C 24 58 01 00 00"_sig
+#define OPTIPISTON_RTX_BUILD_2TEX_SIG                                                                                  \
+    "41 56 56 57 55 53 48 83 EC 20 48 89 CE 0F B7 4C 24 78 48 8B 44 24 70 4C"_sig
+#define OPTIPISTON_RTX_ATTACH_RT_SIG                                                                                   \
+    "56 57 53 48 83 EC 20 48 89 D7 48 89 CE 80 B9 80 00 00 00 01 75 1A 48 8B 47 10 48 85"_sig
+#elif OPTIPISTON_MC == 2660
+constexpr RtxMovingBlockLayout kRtxLayout{
+    true, false, 0, 112, 0, 8, 136, 223, 264, 0, 89, 200, 241, 249, 313, 0x8101u
+};
+#define OPTIPISTON_RTX_INSERT_SIG                                                                                      \
+    "55 41 57 41 56 41 55 41 54 56 57 53 48 81 EC B8 09 00 00 48 8D AC 24 80 00 00 00 44 0F 29 AD 20 09 00 00"_sig
+#define OPTIPISTON_RTX_SUBMIT_SIG                                                                                      \
+    "55 41 57 41 56 41 55 41 54 56 57 53 48 81 EC 58 04 00 00 48 8D AC 24 80 00 00 00 48 C7 85 D0 03 00 00 FE FF FF "  \
+    "FF 49 89 CD"_sig
+#define OPTIPISTON_RTX_CREATE_BVH_SIG                                                                                  \
+    "55 41 57 41 56 41 54 56 57 53 48 83 EC 60 48 8D 6C 24 60 48 C7 45 F8 FE FF FF FF 49 8B B0 B0 01 00 00"_sig
+#define OPTIPISTON_RTX_SET_RT_SIG                                                                                      \
+    "56 57 48 81 EC F8 00 00 00 0F 29 B4 24 E0 00 00 00 48 89 CE 48 8B 84 24 30 01 00 00"_sig
+#endif
+
+using RtxCreateBvhFn = void (*)(void* outResPtr, void* ctx, void const* mceMesh, std::uint32_t vertexCount);
+using RtxSetObjectFn = void* (*)(
+    void*                src,
+    void const*          bvhResPtr,
+    std::uint8_t const*  geomType,
+    std::uint64_t const* motionKey,
+    void const*          atlasResPtr,
+    std::uint16_t const* pbrFlags
+);
+
+struct RtxResolvedFuncs {
+    RtxCreateBvhFn createBvh{};
+    RtxSetObjectFn setRt{};
+    void const*    resVtable{};
+#if OPTIPISTON_MC <= 2651
+    optipiston::rtx_detail::BuildRtPayload2TexFn buildRt2Tex{};
+    optipiston::rtx_detail::AttachRtPayloadFn    attachRt{};
+#endif
+
+    bool ready() const noexcept {
+        return createBvh != nullptr && setRt != nullptr && (!kRtxLayout.hasResVtable || resVtable != nullptr);
+    }
+};
+
+RtxResolvedFuncs const& resolveRtxFuncs() {
+    static RtxResolvedFuncs const resolved = [] {
+        RtxResolvedFuncs out{};
+        auto* const      createFn = OPTIPISTON_RTX_CREATE_BVH_SIG.resolve(true);
+        auto* const      setRtFn  = OPTIPISTON_RTX_SET_RT_SIG.resolve(true);
+        if (!createFn || !setRtFn) return out;
+        if constexpr (kRtxLayout.hasResVtable) {
+            auto const* const insn = static_cast<std::uint8_t const*>(setRtFn) + kRtxLayout.setRtVtableLeaOffset;
+#if OPTIPISTON_MC == 2610
+            if (insn[0] != 0x48 || insn[1] != 0x8D || insn[2] != 0x0D) return out;
+#else
+            if (insn[0] != 0x4C || insn[1] != 0x8D || insn[2] != 0x15) return out;
+#endif
+            std::int32_t disp = 0;
+            std::memcpy(&disp, insn + 3, sizeof(disp));
+            out.resVtable = insn + 7 + disp;
+        }
+        out.createBvh = reinterpret_cast<RtxCreateBvhFn>(createFn);
+        out.setRt     = reinterpret_cast<RtxSetObjectFn>(setRtFn);
+#if OPTIPISTON_MC <= 2651
+        out.buildRt2Tex =
+            reinterpret_cast<optipiston::rtx_detail::BuildRtPayload2TexFn>(OPTIPISTON_RTX_BUILD_2TEX_SIG.resolve(true));
+        out.attachRt =
+            reinterpret_cast<optipiston::rtx_detail::AttachRtPayloadFn>(OPTIPISTON_RTX_ATTACH_RT_SIG.resolve(true));
+#endif
+        return out;
+    }();
+    return resolved;
+}
+
+bool isMovingBlockMaterialHash(std::uint64_t hash) noexcept {
+    switch (hash) {
+    case 0xA044EC5593BED8A5ULL: // moving_block
+    case 0x0331BC2FB742B99EULL: // moving_block_seasons
+    case 0x48BFD3F1321CB4DFULL: // moving_block_alpha_seasons
+    case 0xE0036CBE6021ACBFULL: // moving_block_alpha_single_side
+    case 0x1662E72BFE69B99CULL: // moving_block_alpha
+    case 0x4FD7E2ECA23365F7ULL: // moving_block_double_side
+    case 0xC58F6F36A1294B79ULL: // moving_block_blend
+        return true;
+    default:
+        return false;
+    }
+}
+
+struct RtxPendingMovingMesh {
+    void const*   ctx{};
+    void const*   desc{};
+    void const*   mceMesh{};
+    std::uint32_t vertexCount{};
+    std::uint64_t motionKey{};
+};
+
+thread_local RtxPendingMovingMesh tRtxPending{};
+
+struct RtxPendingScope {
+    explicit RtxPendingScope(RtxPendingMovingMesh const& next) noexcept : saved(tRtxPending) { tRtxPending = next; }
+    ~RtxPendingScope() noexcept { tRtxPending = saved; }
+    RtxPendingScope(RtxPendingScope const&)            = delete;
+    RtxPendingScope& operator=(RtxPendingScope const&) = delete;
+    RtxPendingMovingMesh saved;
+};
+
+struct RtxHookTag {};
+
+LL_TYPE_STATIC_HOOK(
+    OptiPistonFrameBuilderInsertHook,
+    ll::memory::HookPriority::Normal,
+    RtxHookTag,
+    OPTIPISTON_RTX_INSERT_SIG,
+    void*,
+    void* self,
+    void* ctx,
+    void* arg3
+) {
+    auto const* const carrier = tCarrier;
+    if (!carrier || carrier->mType != ::BlockActorType::MovingBlock || !smoothPistonRenderEnabled()
+        || !movingBlockLightingEnabled() || !ctx || !arg3)
+        return origin(self, ctx, arg3);
+
+    auto const* const ctxBytes = static_cast<std::uint8_t const*>(ctx);
+    if (*reinterpret_cast<std::uint32_t const*>(ctxBytes + kRtxLayout.ctxVariantOffset) != 2u)
+        return origin(self, ctx, arg3);
+
+    void const* desc = arg3;
+    if constexpr (kRtxLayout.descFromVariant) {
+        if (*reinterpret_cast<std::uint8_t const*>(static_cast<std::uint8_t const*>(arg3) + 8) != 2u)
+            return origin(self, ctx, arg3);
+        desc = *static_cast<void const* const*>(arg3);
+        if (!desc) return origin(self, ctx, arg3);
+    }
+
+    auto const* const descBytes = static_cast<std::uint8_t const*>(desc);
+    if (descBytes[kRtxLayout.descIsDrawingMovingBlockOffset] != 1u) return origin(self, ctx, arg3);
+
+    auto const* const mat =
+        *reinterpret_cast<::mce::RenderMaterialInfo const* const*>(descBytes + kRtxLayout.descMaterialPtrOffset);
+    if (!mat) return origin(self, ctx, arg3);
+    auto const matHash = mat->mHashedName.get().getHash();
+    if (!isMovingBlockMaterialHash(matHash)) return origin(self, ctx, arg3);
+
+    auto const* const mceMesh =
+        *reinterpret_cast<::mce::Mesh const* const*>(descBytes + kRtxLayout.descMeshPtrOffset);
+    if (!mceMesh) return origin(self, ctx, arg3);
+    auto const vertexCountOpt = mceMesh->mVertexCount.get();
+    if (!vertexCountOpt.has_value() || *vertexCountOpt == 0u) return origin(self, ctx, arg3);
+    auto const vertexCount = *vertexCountOpt;
+
+    auto const    ordinal   = tCarrierMeshOrdinal++;
+    std::uint64_t motionKey = (static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(carrier)) << 8)
+                            ^ static_cast<std::uint64_t>(ordinal);
+    motionKey |= (1ULL << 62);
+    if (motionKey == ~std::uint64_t{0}) motionKey ^= 1ULL;
+
+    RtxPendingScope const scope({ctx, desc, mceMesh, vertexCount, motionKey});
+    return origin(self, ctx, arg3);
+}
+
+LL_TYPE_STATIC_HOOK(
+    OptiPistonSubmitSceneObjectHook,
+    ll::memory::HookPriority::Normal,
+    RtxHookTag,
+    OPTIPISTON_RTX_SUBMIT_SIG,
+    void*,
+    void* ctx,
+    void* src
+) {
+    auto const pending = tRtxPending;
+    if (!pending.desc || pending.ctx != ctx || !src) return origin(ctx, src);
+    tRtxPending.desc = nullptr;
+    if (!smoothPistonRenderEnabled() || !movingBlockLightingEnabled()) return origin(ctx, src);
+
+    auto* const srcBytes = static_cast<std::uint8_t*>(src);
+    if (srcBytes[kRtxLayout.srcHasRaytraceObjOffset] != 0u || srcBytes[kRtxLayout.srcRasterPassOffset] == 0u)
+        return origin(ctx, src);
+
+    auto const& funcs = resolveRtxFuncs();
+    if (!funcs.ready()) return origin(ctx, src);
+
+    auto bvhRes = optipiston::rtx_detail::makeEmptyRtResourceRef(funcs.resVtable);
+    funcs.createBvh(&bvhRes, ctx, pending.mceMesh, pending.vertexCount);
+    if (!bvhRes.ptr) {
+        optipiston::rtx_detail::releaseCtrl(bvhRes.ctrl);
+        return origin(ctx, src);
+    }
+
+    auto              atlasRes     = optipiston::rtx_detail::makeEmptyRtResourceRef(funcs.resVtable);
+    auto const* const descBytes    = static_cast<std::uint8_t const*>(pending.desc);
+    bool const        descHasAtlas = *reinterpret_cast<std::uint64_t const*>(descBytes + kRtxLayout.descHasAtlasOffset) != 0u;
+    if (descHasAtlas) {
+        auto* const* const atlasPair =
+            reinterpret_cast<void* const*>(descBytes + kRtxLayout.descAtlasPtrOffset);
+        atlasRes.ptr  = atlasPair[0];
+        atlasRes.ctrl = atlasPair[1];
+        optipiston::rtx_detail::retainCtrl(atlasRes.ctrl);
+    }
+
+    std::uint8_t geomType = 0;
+    if (srcBytes[kRtxLayout.srcGeomClass2Offset] != 0u) {
+        geomType = 2;
+    } else if (srcBytes[kRtxLayout.srcGeomClass1Offset] != 0u) {
+        geomType = 1;
+    }
+    std::uint16_t const pbrFlags =
+        static_cast<std::uint16_t>(kRtxLayout.terrainPbrBaseFlags | ((geomType == 2) ? 0x0800u : 0u));
+
+#if OPTIPISTON_MC <= 2651
+    constexpr std::int32_t kNeutralRgba = static_cast<std::int32_t>(0xFFFFFF00u);
+    if (funcs.buildRt2Tex != nullptr && funcs.attachRt != nullptr) {
+        auto const emptyRef = optipiston::rtx_detail::makeEmptyRtResourceRef(funcs.resVtable);
+        optipiston::rtx_detail::submitTwoTexRtObject(
+            funcs.buildRt2Tex,
+            funcs.attachRt,
+            funcs.resVtable,
+            src,
+            kRtxLayout.sceneObjRtSlotOffset,
+            bvhRes,
+            geomType,
+            pending.motionKey,
+            atlasRes,
+            pbrFlags,
+            emptyRef,
+            emptyRef,
+            kNeutralRgba,
+            kNeutralRgba
+        );
+    } else {
+        funcs.setRt(src, &bvhRes, &geomType, &pending.motionKey, &atlasRes, &pbrFlags);
+    }
+#else
+    funcs.setRt(src, &bvhRes, &geomType, &pending.motionKey, &atlasRes, &pbrFlags);
+#endif
+
+    srcBytes[kRtxLayout.srcHasRaytraceObjOffset]    = 1u;
+    srcBytes[kRtxLayout.srcRasterPassOffset]        = 0u;
+    srcBytes[kRtxLayout.srcRaytraceWorldPassOffset] = 1u;
+
+    optipiston::rtx_detail::releaseCtrl(atlasRes.ctrl);
+    optipiston::rtx_detail::releaseCtrl(bvhRes.ctrl);
+    return origin(ctx, src);
+}
+
+void undoDirectionalFaceDimming(
+    ::BlockSource const* region,
+    ::Block const&       block,
+    ::mce::MeshData&     meshData,
+    std::size_t          startPos,
+    std::size_t          startColor,
+    std::size_t          startIdx
+) {
+    auto const&       positions = meshData.mPositions.get();
+    auto const&       normals   = meshData.mNormals.get();
+    auto&             colors    = meshData.mColors.get();
+    auto const&       indices   = meshData.mIndices.get();
+    std::size_t const endPos    = positions.size();
+    std::size_t const endColor  = colors.size();
+    std::size_t const endIdx    = indices.size();
+    if (endColor <= startColor || endPos <= startPos) return;
+
+    bool const      isNether   = (region != nullptr && region->getDimensionId() == ::VanillaDimensions::Nether());
+    bool const      isEmissive = (block.getBlockType().getLightEmission(block).mValue > 0);
+    constexpr float ewOpaque   = 0.6f;
+
+    float downS = 1.0f;
+    float upS   = 1.0f;
+    float nsS   = 1.0f;
+    float ewS   = 1.0f;
+    if (isNether) {
+        downS = 0.9f;
+        upS   = 1.0f;
+        nsS   = 0.9f;
+        ewS   = 0.9f;
+    } else if (isEmissive) {
+        downS = 0.875f;
+        upS   = 1.0f;
+        nsS   = 0.95f;
+        ewS   = 0.9f;
+    } else {
+        downS = 0.5f;
+        upS   = 1.0f;
+        nsS   = 0.8f;
+        ewS   = ewOpaque;
+    }
+
+    std::vector<std::uint8_t> done(endColor - startColor, 0);
+
+    auto const applyScalarToVert = [&](std::size_t vi, float s) {
+        if (vi < startColor || vi >= endColor) return;
+        auto& flag = done[vi - startColor];
+        if (flag) return;
+        flag = 1;
+        if (s >= 0.999f) return;
+
+        std::uint32_t const c   = colors[vi];
+        std::uint32_t const c0  = c & 0xFFu;
+        std::uint32_t const c1  = (c >> 8) & 0xFFu;
+        std::uint32_t const c2  = (c >> 16) & 0xFFu;
+        std::uint32_t const a   = c & 0xFF000000u;
+        float const         inv = 1.0f / s;
+        auto const          scaleByte = [inv](std::uint32_t v) -> std::uint32_t {
+            int const rounded = static_cast<int>(std::lround(static_cast<float>(v) * inv));
+            return static_cast<std::uint32_t>(std::clamp(rounded, 0, 255));
+        };
+        colors[vi] = a | scaleByte(c0) | (scaleByte(c1) << 8) | (scaleByte(c2) << 16);
+    };
+
+    if (normals.size() >= endColor) {
+        for (std::size_t vi = startColor; vi < endColor; ++vi) {
+            auto const& n     = normals[vi];
+            float const lenSq = n.x * n.x + n.y * n.y + n.z * n.z;
+            if (lenSq <= 1e-6f) continue;
+            float const ax = std::fabs(n.x);
+            float const ay = std::fabs(n.y);
+            float const az = std::fabs(n.z);
+            float       s  = ewS;
+            if (ay >= ax && ay >= az) {
+                s = (n.y >= 0.0f) ? upS : downS;
+            } else if (az >= ax) {
+                s = nsS;
+            }
+            applyScalarToVert(vi, s);
+        }
+    }
+
+    auto const scalarForFace = [&](::glm::vec3 const& p0, ::glm::vec3 const& p1, ::glm::vec3 const& p2, float& out) {
+        auto const  e1    = p1 - p0;
+        auto const  e2    = p2 - p0;
+        float const nx    = e1.y * e2.z - e1.z * e2.y;
+        float const ny    = e1.z * e2.x - e1.x * e2.z;
+        float const nz    = e1.x * e2.y - e1.y * e2.x;
+        float const lenSq = nx * nx + ny * ny + nz * nz;
+        if (lenSq <= 1e-12f) return false;
+        float const ax = std::fabs(nx);
+        float const ay = std::fabs(ny);
+        float const az = std::fabs(nz);
+        if (ay >= ax && ay >= az) {
+            out = (ny >= 0.0f) ? upS : downS;
+        } else if (az >= ax) {
+            out = nsS;
+        } else {
+            out = ewS;
+        }
+        return true;
+    };
+
+    if (endIdx > startIdx) {
+        for (std::size_t idx = startIdx; idx + 2 < endIdx; idx += 3) {
+            std::size_t const i0 = indices[idx];
+            std::size_t const i1 = indices[idx + 1];
+            std::size_t const i2 = indices[idx + 2];
+            if (i0 >= endPos || i1 >= endPos || i2 >= endPos) continue;
+            float s = 1.0f;
+            if (!scalarForFace(positions[i0], positions[i1], positions[i2], s)) continue;
+            applyScalarToVert(i0, s);
+            applyScalarToVert(i1, s);
+            applyScalarToVert(i2, s);
+        }
+    } else if ((endPos - startPos) >= 4 && ((endPos - startPos) % 4) == 0) {
+        for (std::size_t q = startPos; q + 3 < endPos; q += 4) {
+            float s = 1.0f;
+            if (!scalarForFace(positions[q], positions[q + 1], positions[q + 2], s)) continue;
+            std::size_t const colorBase = startColor + (q - startPos);
+            applyScalarToVert(colorBase, s);
+            applyScalarToVert(colorBase + 1, s);
+            applyScalarToVert(colorBase + 2, s);
+            applyScalarToVert(colorBase + 3, s);
+        }
+    }
+}
+
+thread_local bool tInRtxTessellateBlock = false;
+
+LL_TYPE_INSTANCE_HOOK(
+    OptiPistonTessellateBlockInWorldHook,
+    ll::memory::HookPriority::Normal,
+    BlockTessellator,
+    &BlockTessellator::tessellateBlockInWorld,
+    bool,
+    ::Tessellator&                 tessellator,
+    ::Block const&                 block,
+    ::BlockPos const&              pos,
+    std::bitset<6>                 faces,
+    ::AirAndSimpleBlockBits const* airAndSimpleBlocks
+) {
+    if (!tRtxMovingMeshBuild || tInRtxTessellateBlock) {
+        return origin(tessellator, block, pos, faces, airAndSimpleBlocks);
+    }
+    struct Guard {
+        bool prev;
+        Guard() noexcept : prev(tInRtxTessellateBlock) { tInRtxTessellateBlock = true; }
+        ~Guard() noexcept { tInRtxTessellateBlock = prev; }
+    } const guard;
+
+    auto&             meshData   = tessellator.mMeshData.get();
+    std::size_t const startPos   = meshData.mPositions.get().size();
+    std::size_t const startColor = meshData.mColors.get().size();
+    std::size_t const startIdx   = meshData.mIndices.get().size();
+    bool const        ok         = origin(tessellator, block, pos, faces, airAndSimpleBlocks);
+    if (ok) {
+        undoDirectionalFaceDimming(this->mRegion, block, meshData, startPos, startColor, startIdx);
+    }
+    return ok;
+}
+
+bool gTessellateBlockInWorldInstalled = false;
+
+bool patchVertexLayoutForPbr(void const* srcLayout, std::uint8_t (&outBuf)[112]) noexcept {
+    constexpr std::size_t kVertexLayoutSize = sizeof(decltype(::mce::Mesh::mVertexLayout));
+    static_assert(kVertexLayoutSize == 70 || kVertexLayoutSize == 110);
+    constexpr bool        kCompactLayout      = (kVertexLayoutSize == 70);
+    constexpr std::size_t kIsSplitOffset      = kCompactLayout ? 68u : 108u;
+    constexpr std::size_t kSecondFormatOffset = kCompactLayout ? 34u : 36u;
+    constexpr std::size_t kStrideWordIndex    = kCompactLayout ? 15u : 16u;
+    constexpr std::size_t kPbrOffsetWordIndex = 8u;
+
+    std::memcpy(outBuf, srcLayout, kVertexLayoutSize);
+    bool const  isSplit = outBuf[kIsSplitOffset] != 0u;
+    auto* const vf      = reinterpret_cast<std::uint16_t*>(outBuf + (isSplit ? kSecondFormatOffset : 0u));
+    if ((vf[0] & 0x0080u) != 0u) return false;
+    std::uint16_t const oldStride = vf[kStrideWordIndex];
+    vf[kPbrOffsetWordIndex]       = oldStride;
+    vf[kStrideWordIndex]          = static_cast<std::uint16_t>((oldStride + 4u + 3u) & 0xFFFCu);
+    vf[0]                         = static_cast<std::uint16_t>(vf[0] | 0x0080u);
+    return true;
+}
+
+#if OPTIPISTON_MC <= 2651
+LL_TYPE_INSTANCE_HOOK(
+    OptiPistonGetMeshForBlockInWorldHook,
+    ll::memory::HookPriority::Normal,
+    BlockTessellator,
+    &BlockTessellator::getMeshForBlockInWorld,
+    ::mce::Mesh&,
+    ::Tessellator&        tessellator,
+    ::Block const&        block,
+    ::BlockPos&           blockPos,
+    ::BlockRenderLayer    layer,
+    void const*           owner,
+    bool                  useOccluder,
+    bool                  useRegion,
+    ::LightTexture const& lightTexture
+) {
+    std::uint32_t lm = 0;
+    std::memcpy(&lm, &this->mLightingModelCapabilities, sizeof(lm));
+    bool const rtxMovingActive = smoothPistonRenderEnabled() && movingBlockLightingEnabled() && (lm == 2u);
+    syncInWorldMeshCache(*this, lm, rtxMovingActive);
+    if (!tInMovingBlockRender || !rtxMovingActive) {
+        return origin(tessellator, block, blockPos, layer, owner, useOccluder, useRegion, lightTexture);
+    }
+    BlockTessellatorPbrScope const pbrScope(this, true);
+    RtxMovingMeshBuildScope const  buildScope(true);
+    BakedLightingFlatScope const   flatScope(this, true);
+    auto& mesh = origin(tessellator, block, blockPos, layer, owner, useOccluder, useRegion, lightTexture);
+    recordRtxMovingMesh(&mesh);
+    return mesh;
+}
+
+bool gGetMeshForBlockInWorldInstalled = false;
+
+LL_TYPE_INSTANCE_HOOK(
+    OptiPistonMeshLoadMeshHook,
+    ll::memory::HookPriority::Normal,
+    ::mce::Mesh,
+    &::mce::Mesh::generateHALData,
+    void,
+    ::mce::VertexLayout const* vertexLayout,
+    bool                       splitBuffers
+) {
+    if (smoothPistonRenderEnabled() && movingBlockLightingEnabled() && vertexLayout != nullptr) {
+        auto const& pbrIndices = this->mMeshData.get().mPBRTextureIndices.get();
+        if (!pbrIndices.empty() && consumeRtxMovingMesh(static_cast<::mce::Mesh const*>(this))) {
+            alignas(16) std::uint8_t patched[112]{};
+            if (patchVertexLayoutForPbr(vertexLayout, patched)) {
+                origin(reinterpret_cast<::mce::VertexLayout const*>(patched), splitBuffers);
+                return;
+            }
+        }
+    }
+    origin(vertexLayout, splitBuffers);
+}
+#elif OPTIPISTON_MC == 2660
+struct GetMeshForBlockInWorldTag {};
+
+LL_TYPE_STATIC_HOOK(
+    OptiPistonGetMeshForBlockInWorldHook,
+    ll::memory::HookPriority::Normal,
+    GetMeshForBlockInWorldTag,
+    "55 41 57 41 56 41 55 41 54 56 57 53 48 81 EC 18 04 00 00 48 8D AC 24 80 00 00 00 66 44 0F 7F A5"_sig,
+    ::mce::Mesh&,
+    ::BlockTessellator*   self,
+    ::Tessellator&        tessellator,
+    ::Block const&        block,
+    ::BlockPos&           blockPos,
+    ::BlockRenderLayer    layer,
+    void const*           owner,
+    bool                  useOccluder,
+    bool                  useRegion,
+    ::LightTexture const& lightTexture
+) {
+    if (self == nullptr) {
+        return origin(self, tessellator, block, blockPos, layer, owner, useOccluder, useRegion, lightTexture);
+    }
+    std::uint32_t lm = 0;
+    std::memcpy(&lm, &self->mLightingModelCapabilities, sizeof(lm));
+    bool const rtxMovingActive = smoothPistonRenderEnabled() && movingBlockLightingEnabled() && (lm == 2u);
+    syncInWorldMeshCache(*self, lm, rtxMovingActive);
+    if (!tInMovingBlockRender || !rtxMovingActive) {
+        return origin(self, tessellator, block, blockPos, layer, owner, useOccluder, useRegion, lightTexture);
+    }
+    BlockTessellatorPbrScope const pbrScope(self, true);
+    RtxMovingMeshBuildScope const  buildScope(true);
+    BakedLightingFlatScope const   flatScope(self, true);
+    auto& mesh = origin(self, tessellator, block, blockPos, layer, owner, useOccluder, useRegion, lightTexture);
+    recordRtxMovingMesh(&mesh);
+    return mesh;
+}
+
+bool gGetMeshForBlockInWorldInstalled = false;
+
+struct MeshLoadTag {};
+
+LL_TYPE_STATIC_HOOK(
+    OptiPistonMeshLoadMeshHook,
+    ll::memory::HookPriority::Normal,
+    MeshLoadTag,
+    "55 56 57 53 48 81 EC 98 00 00 00 48 8D AC 24 80 00 00 00 48 C7 45 10 FE FF FF FF 48 89 CE 0F 57 C0 0F 29 45 00 48 8B 49"_sig,
+    void,
+    ::mce::Mesh* mesh,
+    void const*  vertexLayout
+) {
+    if (smoothPistonRenderEnabled() && movingBlockLightingEnabled() && mesh != nullptr && vertexLayout != nullptr) {
+        auto const& pbrIndices = mesh->mMeshData.get().mPBRTextureIndices.get();
+        if (!pbrIndices.empty() && consumeRtxMovingMesh(mesh)) {
+            alignas(16) std::uint8_t patched[112]{};
+            if (patchVertexLayoutForPbr(vertexLayout, patched)) {
+                origin(mesh, patched);
+                return;
+            }
+        }
+    }
+    origin(mesh, vertexLayout);
+}
+#endif
+
+void removeRtxMovingBlockFix(bool& insertInstalled, bool& submitInstalled) {
+    removeHook<OptiPistonTessellateBlockInWorldHook>(gTessellateBlockInWorldInstalled);
+    removeHook<OptiPistonGetMeshForBlockInWorldHook>(gGetMeshForBlockInWorldInstalled);
+    removeHook<OptiPistonSubmitSceneObjectHook>(submitInstalled);
+    removeHook<OptiPistonFrameBuilderInsertHook>(insertInstalled);
+}
+
+void installRtxMovingBlockFix(bool& insertInstalled, bool& submitInstalled) {
+    if (!resolveRtxFuncs().ready()) return;
+    if (!installHook<OptiPistonFrameBuilderInsertHook>(insertInstalled)
+        || !installHook<OptiPistonSubmitSceneObjectHook>(submitInstalled)) {
+        removeRtxMovingBlockFix(insertInstalled, submitInstalled);
+        return;
+    }
+    (void)installHook<OptiPistonGetMeshForBlockInWorldHook>(gGetMeshForBlockInWorldInstalled);
+    (void)installHook<OptiPistonTessellateBlockInWorldHook>(gTessellateBlockInWorldInstalled);
+}
+
+bool gLightFixInstalled[7]{};
 
 // Not fatal when a hook is missing: the arm then keeps the game's own light.
 void installLightFix() {
@@ -7326,9 +8260,11 @@ void installLightFix() {
     if (colorForUVTarget() != 0) (void)installHook<OptiPistonLightUVHook>(gLightFixInstalled[2]);
     (void)installHook<OptiPistonShaderLightHook>(gLightFixInstalled[1]);
     installCarriedLight(gLightFixInstalled[3], gLightFixInstalled[4]);
+    installRtxMovingBlockFix(gLightFixInstalled[5], gLightFixInstalled[6]);
 }
 
 void removeLightFix() {
+    removeRtxMovingBlockFix(gLightFixInstalled[5], gLightFixInstalled[6]);
     removeCarriedLight(gLightFixInstalled[3], gLightFixInstalled[4]);
     removeHook<OptiPistonShaderLightHook>(gLightFixInstalled[1]);
     removeHook<OptiPistonLightUVHook>(gLightFixInstalled[2]);
@@ -7354,7 +8290,7 @@ void removeLightFix() {
 #else
 #define OPTIPISTON_START_REBUILD_HOOK(X)
 #endif
-#if OPTIPISTON_MC >= 2651
+#if OPTIPISTON_MC >= 2620
 #define OPTIPISTON_PROMOTE_HOOK(X) X(OptiPistonPromoteHook)
 #else
 #define OPTIPISTON_PROMOTE_HOOK(X)
@@ -7372,6 +8308,7 @@ void removeLightFix() {
     X(OptiPistonRebuildHook)                                                                                           \
     X(OptiPistonEndRebuildHook)                                                                                        \
     OPTIPISTON_PROMOTE_HOOK(X)                                                                                         \
+    X(OptiPistonMeshLoadMeshHook)                                                                                      \
     X(OptiPistonFrameHook)                                                                                             \
     X(OptiPistonPlayerQueueEntitiesHook)                                                                               \
     X(OptiPistonRenderBlockEntitiesHook)                                                                               \
@@ -7417,6 +8354,10 @@ bool hookPistonRender(bool enable) {
     gHeadEpoch.fetch_add(1, std::memory_order_relaxed);
     clearAnimationState();
     gPlayerOrigin.valid.store(false, std::memory_order_relaxed);
+    gCameraForcedMat.store(nullptr, std::memory_order_relaxed);
+    gCameraMatMoved.store(false, std::memory_order_relaxed);
+    clearRtxMovingMeshes();
+    clearInWorldMeshCacheState();
     OPTIPISTON_PROBE_DO(probeClose();)
 
     gInstalled.store(false, std::memory_order_release);

@@ -391,4 +391,15 @@ TEST_CASE("early re-mesh only when the block landed, has no actor and little vis
     PushTimeline unlanded;
     unlanded.start(3, makeSegment(100, 0.0f, 1.0f, 4.0f), false);
     CHECK_FALSE(unlanded.remeshRequested(103.9));
+
+    auto delayed     = makeSegment(100, 0.0f, 1.0f, 4.0f);
+    delayed.length  += 1.0;
+    delayed.lifetime = std::max(delayed.lifetime, delayed.length);
+    PushTimeline corner;
+    corner.start(4, delayed, false);
+    corner.blockLanded();
+    CHECK_FALSE(corner.shouldRequestRemesh(103.9, 0.5));
+    CHECK_FALSE(corner.tick(105, 104.2));
+    CHECK(corner.shouldRequestRemesh(104.6, 0.5));
+    CHECK(corner.remeshRequested(104.6));
 }

@@ -36,28 +36,40 @@ Segment makeSegment(int64_t tick, float from, float to, float durationTicks) noe
 PushPath carryPushPath(PushPathLeg next, PushPath const& previous, bool corner) {
     PushPath path;
     path.reserve(previous.size() + 1);
-    auto const start  = static_cast<double>(next.segment.startTick);
-    auto const length = next.segment.length;
-    auto       total  = std::abs(next.segment.to - next.segment.from);
+    auto const start      = static_cast<double>(next.segment.startTick);
+    auto const length     = next.segment.length;
+    auto       tailTotal  = 0.0;
+    auto       tailNormal = 0.0;
     for (auto leg : previous) {
         auto const offset = segmentValue(leg.segment, start - leg.delay) - leg.segment.to;
         if (offset == 0.0f) continue;
-        total += std::abs(offset);
+        auto const rem   = static_cast<double>(std::abs(offset));
+        auto const span  = static_cast<double>(std::abs(leg.segment.to - leg.segment.from));
+        auto const remDt = span > 0.0 ? leg.segment.length * (rem / span) : 0.0;
+        tailTotal       += rem;
+        tailNormal      += remDt;
         if (corner) {
             leg.segment.startTick = next.segment.startTick;
             leg.segment.from      = leg.segment.to + offset;
         }
         path.push_back(leg);
     }
-    path.push_back(next);
-    if (corner && total > 0.0f) {
-        double delay = 0.0;
-        for (auto& leg : path) {
-            leg.delay           = delay;
-            leg.segment.length  = length * std::abs(leg.segment.to - leg.segment.from) / total;
-            delay              += leg.segment.length;
+    if (corner) {
+        next.delay = 0.0;
+        if (tailTotal > 0.0 && length > 0.0) {
+            auto const tailBudget = std::min(tailNormal * 0.5, length * 0.25);
+            double     delay      = 0.0;
+            for (auto& leg : path) {
+                auto const rem     = static_cast<double>(std::abs(leg.segment.to - leg.segment.from));
+                leg.delay          = delay;
+                leg.segment.length = tailBudget * (rem / tailTotal);
+                delay             += leg.segment.length;
+            }
+            next.delay            = delay;
+            next.segment.lifetime = std::max(next.segment.lifetime, delay + next.segment.length);
         }
     }
+    path.push_back(next);
     return path;
 }
 

@@ -11,44 +11,27 @@
 #include "ll/api/event/world/ServerLevelTickEvent.h"
 #include "ll/api/io/Logger.h"
 #include "ll/api/memory/Hook.h"
+#include "ll/api/memory/Memory.h"
 #include "ll/api/mod/NativeMod.h"
 #include "ll/api/service/Bedrock.h"
 #include "ll/api/service/TargetedBedrock.h"
 
 #include "mc/client/game/ClientInstance.h"
-#if OPTIPISTON_MC >= 2632
-#include "mc/client/entity/systems/ClientInputUpdateSystem.h"
-#include "mc/deps/vanilla_components/ActorDataFlagComponent.h"
-#include "mc/deps/vanilla_components/MovementAbilitiesComponent.h"
-#include "mc/entity/components/ActorOwnerComponent.h"
-#include "mc/entity/components/MobEffectsComponent.h"
-#include "mc/entity/components/MoveInputComponent.h"
-#include "mc/entity/components/PassengerComponent.h"
-#include "mc/entity/components/RawMoveInputComponent.h"
-#include "mc/entity/components/SneakingComponent.h"
-#include "mc/entity/components/WasInWaterFlagComponent.h"
-#endif
 #include "mc/client/particlesystem/particle/ParticleEmitterActual.h"
 #include "mc/client/particlesystem/particle/ParticleSystemEngine.h"
 #include "mc/client/player/LocalPlayer.h"
+#include "mc/deps/core/math/Vec3.h"
 #include "mc/deps/ecs/gamerefs_entity/EntityContext.h"
-#include "mc/deps/ecs/gamerefs_entity/EntityRegistry.h"
-#include "mc/deps/ecs/systems/IEntitySystemsCollection.h"
-#include "mc/deps/ecs/systems/ITickingSystem.h"
-#include "mc/deps/ecs/systems/SystemInfo.h"
-#include "mc/deps/ecs/systems/TickingSystemId.h"
-#if OPTIPISTON_MC >= 2660
-#include "mc/deps/vanilla_components/entity/components/ActorTickedComponent.h"
-#else
-#include "mc/entity/components/ActorTickedComponent.h"
-#endif
-#include "mc/entity/components/ActorMovementTickNeededComponent.h"
+#include "mc/deps/vanilla_components/StateVectorComponent.h"
 #include "mc/entity/components/IPlayerTickPolicy.h"
 #include "mc/entity/components/ServerPlayerMovementComponent.h"
-#include "mc/entity/systems/EntitySystems.h"
+#include "mc/legacy/ActorUniqueID.h"
 #include "mc/util/Timer.h"
-#include "mc/world/GameCallbacks.h"
 #include "mc/world/Minecraft.h"
+#include "mc/world/actor/Actor.h"
+#include "mc/world/actor/ActorType.h"
+#include "mc/world/actor/item/FallingBlockActor.h"
+#include "mc/world/actor/item/ITickDelegate.h"
 #include "mc/world/actor/player/Player.h"
 #include "mc/world/level/Level.h"
 
@@ -60,8 +43,10 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <random>
 #include <unordered_map>
 #include <unordered_set>
@@ -106,246 +91,34 @@ std::mutex             gVisualClockMutex;
 core::WorldVisualClock gVisualClock;
 ::Level const*         gVisualLevel{};
 
-using BeforeSimTickFn = void (*)(::GameCallbacks*);
-void*           gBeforeSimTickTarget{};
-BeforeSimTickFn gBeforeSimTickOrigin{};
-
-bool independentMovement() {
-    auto const& world = core::worldSpeedSettings();
-    return gInstalled.load(std::memory_order_acquire) && gLocalServerTicking.load(std::memory_order_acquire)
-        && gGuestPlayers.load(std::memory_order_relaxed) == 0 && world.normalMovement.load(std::memory_order_relaxed)
-        && world.applied.load(std::memory_order_relaxed) != 1.0f;
-}
-
-void beforeSimTickDetour(::GameCallbacks* callbacks) {
-    if (independentMovement()) {
-        auto client = ll::service::getClientInstance();
-        if (client && client->getLocalPlayer() && static_cast<::GameCallbacks*>(&*client) == callbacks) return;
-    }
-    gBeforeSimTickOrigin(callbacks);
-}
-
-bool hookMovementInput() {
-    auto client = ll::service::getClientInstance();
-    if (!client) return false;
-    auto* callbacks = static_cast<::GameCallbacks*>(&*client);
-    // GameCallbacks::onBeforeSimTick (slot 3).
-    gBeforeSimTickTarget = (*reinterpret_cast<void***>(callbacks))[3];
-    if (ll::memory::hook(
-            gBeforeSimTickTarget,
-            reinterpret_cast<ll::memory::FuncPtr>(&beforeSimTickDetour),
-            reinterpret_cast<ll::memory::FuncPtr*>(&gBeforeSimTickOrigin),
-            ll::memory::HookPriority::Normal
-        )
-        != 0) {
-        gBeforeSimTickTarget = nullptr;
-        return false;
-    }
-    return true;
-}
-
-void unhookMovementInput() {
-    if (!gBeforeSimTickTarget) return;
-    ll::memory::unhook(gBeforeSimTickTarget, reinterpret_cast<ll::memory::FuncPtr>(&beforeSimTickDetour));
-    gBeforeSimTickTarget = nullptr;
-}
-
-struct ClientMovementSystems {
-    ::EntitySystems*  owner{};
-    ::ITickingSystem* localRewind{};
-    ::ITickingSystem* clientRewind{};
-    ::ITickingSystem* publishHistory{};
-    ::ITickingSystem* sendInput{};
-    uint              addMovementTickFlagId{~0u};
-    uint              designateClientId{~0u};
-    uint              sendInputId{~0u};
-};
-
-ClientMovementSystems gClientMovementSystems;
-thread_local bool     gSuppressNativeLocalMovement{false};
-thread_local bool     gRestoreTickedAfterSendInput{false};
-
-struct SuppressGuard {
-    bool prev;
-    explicit SuppressGuard(bool enable) : prev(gSuppressNativeLocalMovement) {
-        if (enable) gSuppressNativeLocalMovement = true;
-    }
-    ~SuppressGuard() {
-        gSuppressNativeLocalMovement = prev;
-        gRestoreTickedAfterSendInput = false;
-    }
-};
-
-void stripLocalPlayerSimMovement() {
-    auto  client = ll::service::getClientInstance();
-    auto* player = client ? client->getLocalPlayer() : nullptr;
-    if (!player) return;
-    auto& ctx = player->getEntityContext();
-    ctx.removeComponent<::ActorMovementTickNeededComponent>();
-    ctx.removeComponent<::ActorTickedComponent>();
-}
-
-bool stripLocalPlayerTicked() {
-    auto  client = ll::service::getClientInstance();
-    auto* player = client ? client->getLocalPlayer() : nullptr;
-    if (!player) return false;
-    auto& ctx = player->getEntityContext();
-    if (!ctx.hasComponent<::ActorTickedComponent>()) return false;
-    ctx.removeComponent<::ActorTickedComponent>();
-    return true;
-}
-
-void restoreLocalPlayerTicked() {
-    auto  client = ll::service::getClientInstance();
-    auto* player = client ? client->getLocalPlayer() : nullptr;
-    if (!player) return;
-    auto& ctx = player->getEntityContext();
-    ctx.getRegistry().get_or_emplace<::ActorTickedComponent>(ctx.mEntity);
-}
-
-ClientMovementSystems const& ensureClientMovementSystems(::EntitySystems& systems) {
-    if (gClientMovementSystems.owner == &systems) return gClientMovementSystems;
-    gClientMovementSystems       = {};
-    gClientMovementSystems.owner = &systems;
-    if (auto* collection = systems.mSystems.get()) {
-        uint const limit =
-#if OPTIPISTON_MC >= 2632
-            static_cast<uint>(collection->getLargestSystemIndex());
-#else
-            2048u;
-#endif
-        for (uint i = 0; i < limit; ++i) {
-            ::TickingSystemId const id{i};
-            auto const*             info = collection->getSystemInfoForTickingSystemId(id);
-            if (!info) continue;
-            auto* sys = collection->getTickingSystemForTickingSystemId(id);
-            if (info->mName == "LocalPlayerRewindSystem") gClientMovementSystems.localRewind = sys;
-            else if (info->mName == "ClientPlayerRewindSystem") gClientMovementSystems.clientRewind = sys;
-            else if (info->mName == "PublishHistory") gClientMovementSystems.publishHistory = sys;
-            else if (info->mName == "SendPlayerInputPacketSystem") {
-                gClientMovementSystems.sendInput   = sys;
-                gClientMovementSystems.sendInputId = i;
-            } else if (info->mName == "AddMovementTickFlag") gClientMovementSystems.addMovementTickFlagId = i;
-            else if (info->mName == "ActorMovementTickFilterSystem::designateClientEntities")
-                gClientMovementSystems.designateClientId = i;
-        }
-    }
-    auto prevPre             = std::move(systems.mPreSystemInvoke.get());
-    auto prevPost            = std::move(systems.mPostSystemInvoke.get());
-    systems.mPreSystemInvoke = [prevPre = std::move(prevPre)](::TickingSystemId id) {
-        if (prevPre) prevPre(id);
-        if (!gSuppressNativeLocalMovement) return;
-        if (id.value == gClientMovementSystems.designateClientId) stripLocalPlayerSimMovement();
-        else if (id.value == gClientMovementSystems.sendInputId)
-            gRestoreTickedAfterSendInput = stripLocalPlayerTicked();
-    };
-    systems.mPostSystemInvoke = [prevPost = std::move(prevPost)](::TickingSystemId id) {
-        if (gSuppressNativeLocalMovement) {
-            if (id.value == gClientMovementSystems.addMovementTickFlagId) stripLocalPlayerSimMovement();
-            else if (id.value == gClientMovementSystems.sendInputId && gRestoreTickedAfterSendInput) {
-                restoreLocalPlayerTicked();
-                gRestoreTickedAfterSendInput = false;
-            }
-        }
-        if (prevPost) prevPost(id);
-    };
-    return gClientMovementSystems;
-}
-
-LL_TYPE_INSTANCE_HOOK(
-    OptiPistonLevelEntitySystemsHook,
-    ll::memory::HookPriority::Normal,
-    ::Level,
-    &::Level::$tickEntitySystems,
-    void
-) {
-    auto       client   = ll::service::getClientInstance();
-    auto*      player   = client ? client->getLocalPlayer() : nullptr;
-    bool const suppress = independentMovement() && player && &player->getLevel() == this;
-    if (suppress) (void)ensureClientMovementSystems(this->getEntitySystems());
-    SuppressGuard const guard(suppress);
-    origin();
-}
-
-#if OPTIPISTON_MC >= 2632
-template <class T>
-::Optional<T const> optionalMovementComponent(::EntityContext& ctx) {
-    return {
-        reinterpret_cast<typename ::Optional<T const>::storage_type*>(&ctx.getRegistry().storage<T>()),
-        ctx.mEntity
-    };
-}
-#endif
-
-void tickMovementInput(::Timer const* timer) {
-    if (!independentMovement()) return;
-    auto minecraft = ll::service::getMinecraft(true);
-    if (!minecraft || &static_cast<::Timer&>(minecraft->mRealTimer) != timer) return;
-    auto  client = ll::service::getClientInstance();
-    auto* player = client ? client->getLocalPlayer() : nullptr;
-    if (!player) return;
-    auto*       callbacks = static_cast<::GameCallbacks*>(&*client);
-    auto&       systems   = player->getLevel().getEntitySystems();
-    auto const& sys       = ensureClientMovementSystems(systems);
-    for (int i = 0; i < timer->mTicks; ++i) {
-        auto& ctx = player->getEntityContext();
-#if OPTIPISTON_MC >= 2632
-        auto abilities = ctx.tryGetComponent<::MovementAbilitiesComponent>();
-        auto moveInput = ctx.tryGetComponent<::MoveInputComponent>();
-        auto flags     = ctx.tryGetComponent<::ActorDataFlagComponent>();
-        auto effects   = ctx.tryGetComponent<::MobEffectsComponent>();
-        auto owner     = ctx.tryGetComponent<::ActorOwnerComponent>();
-        auto raw       = ctx.tryGetComponent<::RawMoveInputComponent>();
-        if (!abilities || !moveInput || !flags || !effects || !owner || !raw) continue;
-        ::ClientInputUpdateSystem::inputHandlerUpdatePlayerState(
-            *abilities,
-            *effects,
-            *flags,
-            *owner,
-            *moveInput,
-            optionalMovementComponent<::PassengerComponent>(ctx),
-            optionalMovementComponent<::WasInWaterFlagComponent>(ctx)
-        );
-        ::ClientInputUpdateSystem::extractRawHIDInput(
-            *abilities,
-            *moveInput,
-            *flags,
-            *raw,
-            optionalMovementComponent<::SneakingComponent>(ctx),
-            optionalMovementComponent<::WasInWaterFlagComponent>(ctx)
-        );
-#endif
-        gBeforeSimTickOrigin(callbacks);
-        auto&      registry  = ctx.getRegistry();
-        bool const hadTicked = ctx.hasComponent<::ActorTickedComponent>();
-        registry.get_or_emplace<::ActorMovementTickNeededComponent>(ctx.mEntity);
-        registry.get_or_emplace<::ActorTickedComponent>(ctx.mEntity);
-        if (sys.localRewind) sys.localRewind->tick(ctx.mRegistry);
-        if (sys.clientRewind) sys.clientRewind->tick(ctx.mRegistry);
-        if (sys.publishHistory) sys.publishHistory->tick(ctx.mRegistry);
-        systems.tickMovementCorrectionReplay(ctx.mRegistry);
-        if (sys.sendInput) sys.sendInput->tick(ctx.mRegistry);
-        if (!hadTicked) ctx.removeComponent<::ActorTickedComponent>();
-    }
-}
-
 bool isSimTimer(::Timer const* timer, bool clientSide) {
     auto minecraft = ll::service::getMinecraft(clientSide);
     return minecraft && &static_cast<::Timer&>(minecraft->mSimTimer) == timer;
 }
 
-// Keep the host player's server movement credits topped up so low world speed does not stall local movement.
-void creditLocalMovement(::Timer const* timer) {
+std::atomic_bool gDrainMovementBacklog{false};
+
+// Keep the host player's server movement credits topped up so low/paused world speed does not stall or rewind movement.
+void creditLocalMovement(::Timer const* timer, float speed) {
     auto server = ll::service::getMinecraft(false);
     if (!server || &static_cast<::Timer&>(server->mRealTimer) != timer) return;
+    if (speed < 1.0f) {
+        gDrainMovementBacklog.store(true, std::memory_order_relaxed);
+    } else if (!gDrainMovementBacklog.load(std::memory_order_relaxed)) {
+        return;
+    }
     auto* level = server->getLevel();
     if (!level) return;
-    level->forEachPlayer([](::Player& player) {
+    level->forEachPlayer([speed](::Player& player) {
         if (!player.mIsHostingPlayer) return true;
         if (auto movement = player.getEntityContext().tryGetComponent<::ServerPlayerMovementComponent>()) {
             uint64&    credits = movement->mPlayerTickCredits;
             auto const queued  = static_cast<uint64>(movement->mQueuedUpdates.get().size());
-            credits            = std::max(credits, std::min<uint64>(queued, 20));
+            if (speed >= 1.0f && queued <= 2) {
+                gDrainMovementBacklog.store(false, std::memory_order_relaxed);
+            } else {
+                credits = std::max(credits, std::min<uint64>(queued, 1000));
+            }
         }
         return false;
     });
@@ -528,6 +301,10 @@ void unhookFmod() {
 #define OPTIPISTON_TIMER_ARGS   preferredFrameStep
 #endif
 
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-variable"
+#endif
 LL_TYPE_INSTANCE_HOOK(
     OptiPistonSimTimerHook,
     ll::memory::HookPriority::Normal,
@@ -540,7 +317,8 @@ LL_TYPE_INSTANCE_HOOK(
     bool const  client = isSimTimer(this, true);
     if (client && world.paused.load(std::memory_order_relaxed)) refreshWorldSpeed();
     auto const  speed         = world.applied.load(std::memory_order_relaxed);
-    bool const  detached      = client && speed == 0.0f;
+    bool const  allowMovement = client && world.normalMovement.load(std::memory_order_relaxed);
+    bool const  detached      = client && (speed == 0.0f || (speed != 1.0f && allowMovement));
     float const beforeAlpha   = mAlpha;
     if (client && !detached) {
         if (auto const held = updateVisualClock(false, beforeAlpha)) {
@@ -554,7 +332,7 @@ LL_TYPE_INSTANCE_HOOK(
         auto const            it = gScaledTimers.find(this);
         // The game changed the scale since our write (pause, native slow-down); that becomes the new base.
         if (it != gScaledTimers.end() && mTimeScale != it->second.written) it->second.base = mTimeScale;
-        if (speed != 1.0f && (client || it != gScaledTimers.end() || isSimTimer(this, false))) {
+        if (speed != 1.0f && !allowMovement && (client || it != gScaledTimers.end() || isSimTimer(this, false))) {
             if (it != gScaledTimers.end()) {
                 it->second.written = it->second.base * speed;
                 mTimeScale         = it->second.written;
@@ -571,8 +349,9 @@ LL_TYPE_INSTANCE_HOOK(
     }
     if (speed != 1.0f) logTimerOnce(this, scaled);
     origin(OPTIPISTON_TIMER_ARGS);
-    tickMovementInput(this);
-    if (!client && independentMovement()) creditLocalMovement(this);
+    if (!client && world.normalMovement.load(std::memory_order_relaxed)
+        && gGuestPlayers.load(std::memory_order_relaxed) == 0)
+        creditLocalMovement(this, speed);
     if (detached) {
         auto const delta = static_cast<double>(static_cast<float>(mLastTimestep)) * static_cast<float>(mTimeScale)
                          * static_cast<float>(mTicksPerSecond) * speed;
@@ -641,6 +420,235 @@ LL_TYPE_INSTANCE_HOOK(
 }
 #endif
 
+// ---- FallingBlockActor: keep client-side falling block simulation and interpolation on WorldVisualClock ----
+
+struct FallingBlockState {
+    ::Vec3  prevPos{};
+    ::Vec3  curPos{};
+    int64_t lastClientTick{};
+};
+
+struct FallingBlockSync {
+    ::Level const*                               level{};
+    std::optional<int64_t>                       lastClientTick;
+    int64_t                                      lastVisualTick{};
+    int                                          stepsForTick{};
+    std::unordered_map<int64, FallingBlockState> actors;
+
+    void reset() {
+        level = nullptr;
+        lastClientTick.reset();
+        lastVisualTick = 0;
+        stepsForTick   = 0;
+        actors.clear();
+    }
+};
+
+std::mutex           gFallingBlockMutex;
+FallingBlockSync     gFallingBlocks;
+std::atomic_bool     gFallingSteppedValid{false};
+std::atomic<int64_t> gFallingSteppedVisualTick{0};
+
+void resetFallingBlockSync() {
+    std::lock_guard const guard(gFallingBlockMutex);
+    gFallingBlocks.reset();
+    gFallingSteppedValid.store(false, std::memory_order_relaxed);
+}
+
+float distSquared(::Vec3 const& a, ::Vec3 const& b) noexcept {
+    float const dx = a.x - b.x;
+    float const dy = a.y - b.y;
+    float const dz = a.z - b.z;
+    return dx * dx + dy * dy + dz * dz;
+}
+
+#if OPTIPISTON_MC == 2660
+using ll::memory_literals::operator""_sig;
+// FallingBlockActor::doNormalTick
+#define OPTIPISTON_FALLING_BLOCK_DO_NORMAL_TICK                                                                        \
+    "55 41 57 41 56 41 55 41 54 56 57 53 48 81 EC 98 01 00 00 48 8D AC 24 80 00 00 00 44 0F 29 85 00 01 00 00 0F 29 "  \
+    "BD F0 00 00 00 0F 29 B5 E0 00 00 00 48 C7 85 D8 00 00 00 FE FF FF FF 49 89 D4 48 89 CE 48 83 B9 F8 03 00 00 00 "  \
+    "0F 84 ?? ?? ?? ?? 48 8B 8E 00 02 00 00 48 8B 01 48 8B 80 E0 09 00 00 48 8D 5D B0 48 89 DA FF 15 ?? ?? ?? ??"_sig
+#else
+#define OPTIPISTON_FALLING_BLOCK_DO_NORMAL_TICK &::FallingBlockActor::doNormalTick
+#endif
+
+LL_TYPE_INSTANCE_HOOK(
+    OptiPistonFallingBlockTickHook,
+    ll::memory::HookPriority::Normal,
+    ::FallingBlockActor,
+    OPTIPISTON_FALLING_BLOCK_DO_NORMAL_TICK,
+    void,
+    ::ITickDelegate& tickDelegate
+) {
+    if (!this->mLevel) {
+        origin(tickDelegate);
+        return;
+    }
+    auto const& level = this->getLevel();
+    if (!level.isClientSide()) {
+        origin(tickDelegate);
+        return;
+    }
+
+    auto const sample = worldVisualClock(level);
+    if (!sample.partial) {
+        {
+            std::lock_guard const guard(gFallingBlockMutex);
+            if (gFallingBlocks.level == &level && (gFallingBlocks.lastClientTick || !gFallingBlocks.actors.empty())) {
+                gFallingBlocks.reset();
+                gFallingSteppedValid.store(false, std::memory_order_relaxed);
+            }
+        }
+        origin(tickDelegate);
+        return;
+    }
+
+    auto const  clientTick = static_cast<int64_t>(level.getCurrentTick().tickID);
+    auto const  actorId    = this->getOrCreateUniqueID().rawID;
+    float const speed      = core::worldSpeedSettings().applied.load(std::memory_order_relaxed);
+    auto        state      = this->getEntityContext().tryGetComponent<::StateVectorComponent>();
+
+    int steps = 0;
+    {
+        std::lock_guard const guard(gFallingBlockMutex);
+        if (gFallingBlocks.level != &level) {
+            gFallingBlocks.reset();
+            gFallingBlocks.level = &level;
+            gFallingSteppedValid.store(false, std::memory_order_relaxed);
+        }
+
+        if (gFallingBlocks.lastClientTick != clientTick) {
+            std::erase_if(gFallingBlocks.actors, [clientTick](auto const& entry) {
+                return entry.second.lastClientTick < clientTick - 40;
+            });
+
+            if (!gFallingBlocks.lastClientTick || clientTick <= *gFallingBlocks.lastClientTick
+                || clientTick - *gFallingBlocks.lastClientTick > 2) {
+                gFallingBlocks.lastVisualTick = sample.tick;
+                gFallingBlocks.stepsForTick   = 0;
+            } else if (speed <= 0.0f) {
+                gFallingBlocks.lastVisualTick = sample.tick;
+                gFallingBlocks.stepsForTick   = 0;
+            } else {
+                auto const delta              = sample.tick - gFallingBlocks.lastVisualTick;
+                auto const clamped            = static_cast<int>(std::clamp<int64_t>(delta, 0, 8));
+                gFallingBlocks.stepsForTick   = clamped;
+                gFallingBlocks.lastVisualTick += clamped;
+            }
+            gFallingBlocks.lastClientTick = clientTick;
+            gFallingSteppedVisualTick.store(gFallingBlocks.lastVisualTick, std::memory_order_relaxed);
+            gFallingSteppedValid.store(true, std::memory_order_release);
+        }
+
+        steps = gFallingBlocks.stepsForTick;
+        if (steps <= 0) {
+            if (state) {
+                auto const cur = state->mPos.get();
+                auto const it  = gFallingBlocks.actors.find(actorId);
+                if (it != gFallingBlocks.actors.end()) {
+                    auto& cached          = it->second;
+                    cached.lastClientTick = clientTick;
+                    float const d2        = distSquared(cur, cached.curPos);
+                    if (d2 <= 1e-10f) {
+                        // Unchanged on a skipped client tick: restore mPosPrev so render interpolation stays smooth.
+                        state->mPosPrev.get() = cached.prevPos;
+                    } else if (d2 < 4.0f) {
+                        // Small external reconciliation (< 2 blocks): keep the previous interpolation anchor.
+                        cached.curPos         = cur;
+                        state->mPosPrev.get() = cached.prevPos;
+                    } else {
+                        // Large jump/teleport: snap interpolation anchor to avoid streaking.
+                        cached.prevPos        = cur;
+                        cached.curPos         = cur;
+                        state->mPosPrev.get() = cur;
+                    }
+                } else {
+                    gFallingBlocks.actors.emplace(
+                        actorId,
+                        FallingBlockState{state->mPosPrev.get(), cur, clientTick}
+                    );
+                }
+            }
+            return;
+        }
+    }
+
+    for (int i = 0; i < steps; ++i) {
+        if (this->mRemoved) break;
+        origin(tickDelegate);
+    }
+
+    if (auto postState = this->getEntityContext().tryGetComponent<::StateVectorComponent>()) {
+        std::lock_guard const guard(gFallingBlockMutex);
+        if (this->mRemoved) {
+            gFallingBlocks.actors.erase(actorId);
+        } else {
+            gFallingBlocks.actors[actorId] = FallingBlockState{
+                postState->mPosPrev.get(),
+                postState->mPos.get(),
+                clientTick,
+            };
+        }
+    }
+}
+
+LL_TYPE_INSTANCE_HOOK(
+    OptiPistonFallingBlockInterpHook,
+    ll::memory::HookPriority::Normal,
+    ::Actor,
+    &::Actor::getInterpolatedPosition,
+    ::Vec3,
+    float a
+) {
+    if (this->getEntityTypeId() == ::ActorType::FallingBlock && this->mLevel && this->getLevel().isClientSide()) {
+        if (auto const sample = worldVisualClock(this->getLevel()); sample.partial) {
+            float alpha = *sample.partial;
+            // If WorldVisualClock already crossed to the next visual tick between 20 Hz client ticks, clamp at 1
+            // until doNormalTick steps mPosPrev/mPos so the falling block never snaps backwards.
+            if (gFallingSteppedValid.load(std::memory_order_acquire)
+                && sample.tick > gFallingSteppedVisualTick.load(std::memory_order_relaxed)) {
+                alpha = 1.0f;
+            }
+            return origin(alpha);
+        }
+    }
+    return origin(a);
+}
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
+
+bool gFallingTickHooked{false};
+bool gFallingInterpHooked{false};
+
+void hookFallingBlocks(ll::io::Logger& logger) {
+    if (OptiPistonFallingBlockTickHook::hook() != 0) {
+        logger.warn("FallingBlock tick hook unavailable; falling blocks will tick at client rate");
+        return;
+    }
+    gFallingTickHooked = true;
+    if (OptiPistonFallingBlockInterpHook::hook() != 0) {
+        OptiPistonFallingBlockTickHook::unhook();
+        gFallingTickHooked = false;
+        logger.warn("FallingBlock interp hook unavailable; falling blocks will use native frame alpha");
+        return;
+    }
+    gFallingInterpHooked = true;
+}
+
+void unhookFallingBlocks() {
+    if (gFallingInterpHooked) {
+        OptiPistonFallingBlockInterpHook::unhook();
+        gFallingInterpHooked = false;
+    }
+    if (gFallingTickHooked) {
+        OptiPistonFallingBlockTickHook::unhook();
+        gFallingTickHooked = false;
+    }
+    resetFallingBlockSync();
+}
+
 char const* computeBlocker() {
     if (!gInstalled.load(std::memory_order_acquire)) return "optipiston.worldSpeed.unavailable";
     if (core::externalClock().sample()) return "optipiston.worldSpeed.externalClock";
@@ -701,12 +709,15 @@ void listen() {
     }));
     gListeners.push_back(bus.emplaceListener<ll::event::ClientExitLevelEvent>([](auto&&) {
         gLocalServerTicking.store(false, std::memory_order_release);
+        gDrainMovementBacklog.store(false, std::memory_order_relaxed);
         gGuestPlayers.store(0, std::memory_order_relaxed);
-        gClientMovementSystems = {};
         refreshWorldSpeed();
-        std::lock_guard const guard(gVisualClockMutex);
-        gVisualLevel = nullptr;
-        gVisualClock = {};
+        {
+            std::lock_guard const guard(gVisualClockMutex);
+            gVisualLevel = nullptr;
+            gVisualClock = {};
+        }
+        resetFallingBlockSync();
     }));
 }
 
@@ -714,7 +725,6 @@ void unlisten() {
     auto& bus = ll::event::EventBus::getInstance();
     for (auto const& listener : gListeners) bus.removeListener(listener);
     gListeners.clear();
-    gClientMovementSystems = {};
 }
 
 } // namespace
@@ -740,24 +750,14 @@ bool hookWorldSpeed(bool enable) {
     auto& logger = ll::mod::NativeMod::current()->getLogger();
     if (enable) {
         if (gInstalled.load(std::memory_order_acquire)) return true;
-        if (!hookMovementInput()) return false;
-        if (OptiPistonLevelEntitySystemsHook::hook() != 0) {
-            unhookMovementInput();
-            return false;
-        }
-        if (OptiPistonSimTimerHook::hook() != 0) {
-            OptiPistonLevelEntitySystemsHook::unhook();
-            unhookMovementInput();
-            return false;
-        }
+        if (OptiPistonSimTimerHook::hook() != 0) return false;
         if (OptiPistonParticleHook::hook() != 0) {
             OptiPistonSimTimerHook::unhook();
-            OptiPistonLevelEntitySystemsHook::unhook();
-            unhookMovementInput();
             return false;
         }
         if (OptiPistonParticleEmitHook::hook() != 0)
             logger.warn("Particle emitter hook unavailable; ambient particles may pile up at low speed");
+        hookFallingBlocks(logger);
         if (!hookFmod()) logger.warn("FMOD exports unavailable; world speed will not change audio");
         listen();
         gInstalled.store(true, std::memory_order_release);
@@ -767,11 +767,10 @@ bool hookWorldSpeed(bool enable) {
     unlisten();
     core::worldSpeedSettings().applied.store(1.0f);
     unhookFmod();
+    unhookFallingBlocks();
     OptiPistonParticleEmitHook::unhook();
     OptiPistonParticleHook::unhook();
     OptiPistonSimTimerHook::unhook();
-    OptiPistonLevelEntitySystemsHook::unhook();
-    unhookMovementInput();
     {
         // Tracked timers belong to a running server; a stopped one was already restored and cleared.
         std::lock_guard const guard(gTimerMutex);

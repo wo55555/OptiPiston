@@ -7,11 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-22
+
+> Prerelease for every Minecraft line (26.10, 26.20, 26.30, 26.40, 26.50, 26.60). Install the variant for your line, for example `lip install github.com/wo55555/OptiPiston#client_mc26_50@0.4.0`. The configuration gains `piston.range` and `worldSpeed.normalMovement`; existing files keep working and get the defaults. The C API v1 is unchanged. All six lines have been built, passed unit tests, and tested in game (including RTX moving-block lighting).
+
 ### Added
 
 - A `piston.range` option (default `128` blocks, `0` for unlimited) and `/optipiston piston range <blocks>` command to limit piston animation and moving-block lighting fixes by distance from the player.
 - Commands `/optipiston speed pause` and `/optipiston speed resume` to pause and resume singleplayer world simulation.
 - A config-only `worldSpeed.normalMovement` option (on by default) to keep local player movement at normal speed when world speed is changed or paused.
+- True Ray Tracing (RTX) moving-block lighting, shadows, PBR materials, and emissive illumination across every line (26.10–26.60) when `piston.movingBlockLighting` is enabled.
 
 ### Fixed
 
@@ -20,6 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed pushed blocks briefly taking a sibling block's appearance when redirected together before their animations finish.
 - Fixed a corner-redirected piston head clipping into the block it pushes while the block finishes its previous push.
 - Fixed ambient particles (such as campfire smoke) piling up when world speed is slowed down or paused.
+- Fixed falling blocks (such as sand and gravel) advancing out of sync with slowed or paused world speed while keeping local player movement smooth.
+- Fixed world speed commands and status checks on servers where world speed is blocked.
+- Fixed pushed blocks briefly leaving stale chunk geometry behind when a subchunk becomes empty after a rebuild (26.20–26.60).
+- Fixed corner-redirected pushes compressing the new push's speed; carried tails now accelerate briefly so the new push plays at normal speed.
 
 ## [0.3.2] - 2026-11-13
 
@@ -147,7 +156,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Singleplayer world speed with optional audio and particle scaling.
 - `/optipiston` client command and a C API for Playback's replay clock.
 
-[Unreleased]: https://github.com/wo55555/OptiPiston/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/wo55555/OptiPiston/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/wo55555/OptiPiston/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/wo55555/OptiPiston/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/wo55555/OptiPiston/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/wo55555/OptiPiston/compare/v0.2.0...v0.3.0

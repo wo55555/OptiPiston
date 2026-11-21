@@ -5,7 +5,7 @@
   <p>A client-only LeviLamina mod for Minecraft Bedrock on Windows that smooths piston animation and adds singleplayer world speed control.</p>
 
   <p>
-    <img src="https://img.shields.io/badge/version-v0.3.2-4c8bf5?style=flat-square" alt="OptiPiston v0.3.2">
+    <img src="https://img.shields.io/badge/version-v0.4.0-4c8bf5?style=flat-square" alt="OptiPiston v0.4.0">
     <img src="https://img.shields.io/badge/Minecraft%20Bedrock-Windows%20x64-62b47a?style=flat-square" alt="Minecraft Bedrock for Windows x64">
     <img src="https://img.shields.io/badge/LeviLamina-26.10%E2%80%9326.60-7b68ee?style=flat-square" alt="LeviLamina 26.10 to 26.60">
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue?style=flat-square" alt="AGPL-3.0 license"></a>
@@ -78,7 +78,7 @@ Download `OptiPiston-mc<line>-windows-x64.zip` for your line (for example `OptiP
 | `/optipiston piston duration <ticks>`  | Set the animation length, from `2` to `4` game ticks.                        |
 | `/optipiston piston redirect diagonal` | A block pushed again mid-push moves diagonally.                              |
 | `/optipiston piston redirect corner`   | A block pushed again mid-push finishes its first push, then turns (default). |
-| `/optipiston piston lighting on`       | Light a moving block like the block it carries (default).                    |
+| `/optipiston piston lighting on`       | Light a moving block like the block it carries across Simple, Fancy, Vibrant Visuals, and RTX (default). |
 | `/optipiston piston lighting off`      | Leave a moving block's light to the game.                                    |
 | `/optipiston piston range <blocks>`    | Set the optimization range in blocks (`0`–`1024`, `0` for unlimited; default `128`). |
 | `/optipiston speed <value>`            | Set world speed, from `0.01` to `100`.                                       |
@@ -123,7 +123,7 @@ The configuration lives at `mods/OptiPiston/config/config.json` and is kept acro
 | `piston.enabled`             | Turn piston animation on or off.                               |
 | `piston.durationTicks`       | Animation length in game ticks, from `2` to `4`.               |
 | `piston.redirectType`        | Path of a block pushed again mid-push: `Diagonal` or `Corner`. |
-| `piston.movingBlockLighting` | Light a moving block like the block it carries.                |
+| `piston.movingBlockLighting` | Light a moving block like the block it carries across Simple, Fancy, Vibrant Visuals, and RTX. |
 | `piston.range`               | Max distance from the player in blocks for piston animation fixes (`0` for unlimited, default `128`). |
 | `worldSpeed.presets`         | Speeds cycled by `speed next` / `speed prev`.                  |
 | `worldSpeed.audio`           | Scale sound playback with world speed.                         |
@@ -152,16 +152,16 @@ API v1 also reads and writes the piston toggle and duration. Setters clamp to th
 
 | Minecraft line | LeviLamina | Lip variant      | Status                                   |
 | -------------- | ---------- | ---------------- | ---------------------------------------- |
-| 26.10          | `26.10.*`  | `client_mc26_10` | Prerelease; tested in game after `0.3.0` |
-| 26.20          | `26.20.*`  | `client_mc26_20` | Prerelease; tested in game after `0.3.0` |
-| 26.30          | `26.32.*`  | `client_mc26_30` | Prerelease; tested in game after `0.3.1` |
-| 26.40          | `26.40.*`  | `client_mc26_40` | Prerelease; tested in game after `0.3.0` |
-| 26.50          | `26.51.*`  | `client_mc26_50` | Prerelease; tested in game on `0.3.2`    |
-| 26.60          | `26.60.*`  | `client_mc26_60` | Prerelease; not yet tested in game       |
+| 26.10          | `26.10.*`  | `client_mc26_10` | Prerelease; tested in game on `0.4.0`    |
+| 26.20          | `26.20.*`  | `client_mc26_20` | Prerelease; tested in game on `0.4.0`    |
+| 26.30          | `26.32.*`  | `client_mc26_30` | Prerelease; tested in game on `0.4.0`    |
+| 26.40          | `26.40.*`  | `client_mc26_40` | Prerelease; tested in game on `0.4.0`    |
+| 26.50          | `26.51.*`  | `client_mc26_50` | Prerelease; tested in game on `0.4.0`    |
+| 26.60          | `26.60.*`  | `client_mc26_60` | Prerelease; tested in game on `0.4.0`    |
 
-`0.3.2` has the same features on every line, including the arm lighting fix (no black arm or head after retracting with a block); in `0.3.0` that fix is active on 26.50 only. One step is specific to 26.50 and 26.60: there the game shows a rebuilt chunk a few frames after building it, and the animation waits for that handover. The older lines showed no such gap in testing.
+`0.4.0` has the same features on every line, including the arm lighting fix (no black arm or head after retracting with a block); in `0.3.0` that fix is active on 26.50 only. One step is specific to 26.50 and 26.60: there the game shows a rebuilt chunk a few frames after building it, and the animation waits for that handover. The older lines showed no such gap in testing.
 
-Every line ships in the same release, [`v0.3.2`](https://github.com/wo55555/OptiPiston/releases/tag/v0.3.2), as its own asset `OptiPiston-mc<line>-windows-x64.zip`; each build only loads on the listed LeviLamina version. All currently published releases are prereleases. OptiPiston targets Minecraft Bedrock for Windows x64 and is distributed as a client-only mod.
+Every line ships in the same release, [`v0.4.0`](https://github.com/wo55555/OptiPiston/releases/tag/v0.4.0), as its own asset `OptiPiston-mc<line>-windows-x64.zip`; each build only loads on the listed LeviLamina version. All currently published releases are prereleases. OptiPiston targets Minecraft Bedrock for Windows x64 and is distributed as a client-only mod.
 
 ## Build From Source
 
@@ -178,7 +178,7 @@ For example, `--mc=26.20` builds the MC 26.20 / LeviLamina 26.20 line. The mod i
 
 ### Packaging a Release
 
-The package version is `optipiston_version` in `xmake.lua`; the mod manifest adds the line, for example `0.3.2-mc26.20`. `tooth.json` has one variant per line. Configuring syncs its version and fails if any variant's LeviLamina range or asset name does not match `xmake.lua`. Lip installs from the `tooth.json` at the release tag, so commit it before publishing. The **Publish** workflow releases every line under one tag:
+The package version is `optipiston_version` in `xmake.lua`; the mod manifest adds the line, for example `0.4.0-mc26.20`. `tooth.json` has one variant per line. Configuring syncs its version and fails if any variant's LeviLamina range or asset name does not match `xmake.lua`. Lip installs from the `tooth.json` at the release tag, so commit it before publishing. The **Publish** workflow releases every line under one tag:
 
 1. Bump `optipiston_version` in `xmake.lua`, run `xmake f` to sync `tooth.json`, add a `## [<version>]` section to `CHANGELOG.md`, and push to `main`.
 2. Run the workflow:
@@ -187,14 +187,12 @@ The package version is `optipiston_version` in `xmake.lua`; the mod manifest add
    gh workflow run publish.yml
    ```
 
-3. It tags `main` as `v<version>` (for example `v0.3.2`), builds and tests every line in `tooth.json`, and publishes one prerelease with its notes from `CHANGELOG.md` and an `OptiPiston-mc<line>-windows-x64.zip` per line. Nothing is published unless every line builds.
+3. It tags `main` as `v<version>` (for example `v0.4.0`), builds and tests every line in `tooth.json`, and publishes one prerelease with its notes from `CHANGELOG.md` and an `OptiPiston-mc<line>-windows-x64.zip` per line. Nothing is published unless every line builds.
 
 ## Known Limitations
 
-- 26.30 and 26.60 have not been run in game. They are ported from the LeviLamina headers, build, and pass the unit tests.
 - The lines reach the same steps through different entry points. Outside 26.20 the frame counter follows `LevelRenderer::renderLevel` and the arm's visual progress applies only while the arm is drawn; 26.10 intercepts both piston renderers where the game dispatches them. These paths may differ slightly at the start or end of a move.
 - Tested in local worlds and Playback replays; multiplayer servers are not yet verified.
-- Blocks moved by a piston can flicker darker while moving. Vanilla does the same; it is not fixed yet.
 - World speed is singleplayer only and does not persist across restarts.
 
 [Open an issue](https://github.com/wo55555/OptiPiston/issues) with logs and version details to report a reproducible problem.

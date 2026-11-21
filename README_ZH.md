@@ -5,7 +5,7 @@
   <p>面向 Windows LeviLamina 的 Minecraft 基岩版纯客户端模组，提供平滑活塞动画和单人世界变速。</p>
 
   <p>
-    <img src="https://img.shields.io/badge/version-v0.3.2-4c8bf5?style=flat-square" alt="OptiPiston v0.3.2">
+    <img src="https://img.shields.io/badge/version-v0.4.0-4c8bf5?style=flat-square" alt="OptiPiston v0.4.0">
     <img src="https://img.shields.io/badge/Minecraft%20Bedrock-Windows%20x64-62b47a?style=flat-square" alt="Windows x64 Minecraft 基岩版">
     <img src="https://img.shields.io/badge/LeviLamina-26.10%E2%80%9326.60-7b68ee?style=flat-square" alt="LeviLamina 26.10 至 26.60">
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue?style=flat-square" alt="AGPL-3.0 许可证"></a>
@@ -78,7 +78,7 @@ lip install github.com/wo55555/OptiPiston#client_mc26_20@<version>
 | `/optipiston piston duration <ticks>`  | 设置动画时长，范围 `2` 到 `4` 游戏刻。                 |
 | `/optipiston piston redirect diagonal` | 推动中被再次推动的方块斜向移动。                       |
 | `/optipiston piston redirect corner`   | 推动中被再次推动的方块先加速到位，再直角拐弯（默认）。 |
-| `/optipiston piston lighting on`       | 移动中的方块按它搬运的方块计算光照（默认）。           |
+| `/optipiston piston lighting on`       | 移动中的方块按它搬运的方块计算光照，支持简洁、高品质、Vibrant Visuals 与 RTX 光线追踪（默认）。 |
 | `/optipiston piston lighting off`      | 移动中的方块光照交给游戏原生处理。                     |
 | `/optipiston piston range <blocks>`    | 设置活塞优化范围（`0`–`1024` 格，`0` 为不限，默认 `128`）。 |
 | `/optipiston speed <value>`            | 设置世界速度，范围 `0.01` 到 `100`。                   |
@@ -123,7 +123,7 @@ lip install github.com/wo55555/OptiPiston#client_mc26_20@<version>
 | `piston.enabled`             | 开启或关闭活塞动画。                                   |
 | `piston.durationTicks`       | 动画时长（游戏刻），范围 `2` 到 `4`。                  |
 | `piston.redirectType`        | 推动中被再次推动的方块的路径：`Diagonal` 或 `Corner`。 |
-| `piston.movingBlockLighting` | 移动中的方块按它搬运的方块计算光照。                   |
+| `piston.movingBlockLighting` | 移动中的方块按它搬运的方块计算光照（支持简洁、高品质、Vibrant Visuals 与 RTX 光线追踪）。 |
 | `piston.range`               | 活塞动画修复的最大距离（格，`0` 为不限，默认 `128`）。 |
 | `worldSpeed.presets`         | `speed next` / `speed prev` 循环的速度。               |
 | `worldSpeed.audio`           | 声音播放随世界速度缩放。                               |
@@ -152,16 +152,16 @@ API v1 还可以读写活塞动画开关和时长；设置值会限制在支持�
 
 | Minecraft 版本线 | LeviLamina | Lip 变体         | 状态                                      |
 | ---------------- | ---------- | ---------------- | ----------------------------------------- |
-| 26.10            | `26.10.*`  | `client_mc26_10` | 预发布，已在 `0.3.0` 之后的构建上实机测试 |
-| 26.20            | `26.20.*`  | `client_mc26_20` | 预发布，已在 `0.3.0` 之后的构建上实机测试 |
-| 26.30            | `26.32.*`  | `client_mc26_30` | 预发布，已在 `0.3.1` 之后的构建上实机测试 |
-| 26.40            | `26.40.*`  | `client_mc26_40` | 预发布，已在 `0.3.0` 之后的构建上实机测试 |
-| 26.50            | `26.51.*`  | `client_mc26_50` | 预发布，已在 `0.3.2` 上实机测试           |
-| 26.60            | `26.60.*`  | `client_mc26_60` | 预发布，尚未实机测试                      |
+| 26.10            | `26.10.*`  | `client_mc26_10` | 预发布，已在 `0.4.0` 上实机测试           |
+| 26.20            | `26.20.*`  | `client_mc26_20` | 预发布，已在 `0.4.0` 上实机测试           |
+| 26.30            | `26.32.*`  | `client_mc26_30` | 预发布，已在 `0.4.0` 上实机测试           |
+| 26.40            | `26.40.*`  | `client_mc26_40` | 预发布，已在 `0.4.0` 上实机测试           |
+| 26.50            | `26.51.*`  | `client_mc26_50` | 预发布，已在 `0.4.0` 上实机测试           |
+| 26.60            | `26.60.*`  | `client_mc26_60` | 预发布，已在 `0.4.0` 上实机测试           |
 
-`0.3.2` 在所有版本线上功能一致，包括回缩带方块后活塞臂和活塞头发黑的光照修复；在 `0.3.0` 中该修复只在 26.50 上启用。只有一步是 26.50 和 26.60 特有的：这两个版本的游戏会在区块重建完成几帧之后才显示它，动画会等到这次交接完成。更早的版本线在测试中没有出现这种间隔。
+`0.4.0` 在所有版本线上功能一致，包括回缩带方块后活塞臂和活塞头发黑的光照修复；在 `0.3.0` 中该修复只在 26.50 上启用。只有一步是 26.50 和 26.60 特有的：这两个版本的游戏会在区块重建完成几帧之后才显示它，动画会等到这次交接完成。更早的版本线在测试中没有出现这种间隔。
 
-OptiPiston 面向 Windows x64 平台的 Minecraft 基岩版，以纯客户端模组形式发布。所有版本线都在同一个发行版 [`v0.3.2`](https://github.com/wo55555/OptiPiston/releases/tag/v0.3.2) 中发布，每条版本线一个资产 `OptiPiston-mc<版本线>-windows-x64.zip`，各自只能在所列 LeviLamina 版本上加载。目前已发布的都是预发布版本。
+OptiPiston 面向 Windows x64 平台的 Minecraft 基岩版，以纯客户端模组形式发布。所有版本线都在同一个发行版 [`v0.4.0`](https://github.com/wo55555/OptiPiston/releases/tag/v0.4.0) 中发布，每条版本线一个资产 `OptiPiston-mc<版本线>-windows-x64.zip`，各自只能在所列 LeviLamina 版本上加载。目前已发布的都是预发布版本。
 
 ## 从源码构建
 
@@ -178,7 +178,7 @@ xmake run optipiston-tests
 
 ### 打包发布
 
-包版本是 `xmake.lua` 中的 `optipiston_version`；模组清单中的版本会再加上版本线，例如 `0.3.2-mc26.20`。`tooth.json` 为每条版本线提供一个变体。配置时会同步其中的版本号，并在任一变体的 LeviLamina 版本范围或资产名与 `xmake.lua` 不一致时报错。Lip 按发布标签处的 `tooth.json` 安装，因此发布前要先提交它。**Publish** 工作流用同一个标签发布所有版本线：
+包版本是 `xmake.lua` 中的 `optipiston_version`；模组清单中的版本会再加上版本线，例如 `0.4.0-mc26.20`。`tooth.json` 为每条版本线提供一个变体。配置时会同步其中的版本号，并在任一变体的 LeviLamina 版本范围或资产名与 `xmake.lua` 不一致时报错。Lip 按发布标签处的 `tooth.json` 安装，因此发布前要先提交它。**Publish** 工作流用同一个标签发布所有版本线：
 
 1. 修改 `xmake.lua` 中的 `optipiston_version`，运行 `xmake f` 同步 `tooth.json`，在 `CHANGELOG.md` 中添加 `## [<版本>]` 章节，并推送到 `main`。
 2. 运行工作流：
@@ -187,14 +187,12 @@ xmake run optipiston-tests
    gh workflow run publish.yml
    ```
 
-3. 工作流为 `main` 打 `v<版本>` 标签（例如 `v0.3.2`），构建并测试 `tooth.json` 中的每条版本线，然后发布一个预发布版本，附带 `CHANGELOG.md` 中的说明和每条版本线各自的 `OptiPiston-mc<版本线>-windows-x64.zip`。任一版本线构建失败都不会发布。
+3. 工作流为 `main` 打 `v<版本>` 标签（例如 `v0.4.0`），构建并测试 `tooth.json` 中的每条版本线，然后发布一个预发布版本，附带 `CHANGELOG.md` 中的说明和每条版本线各自的 `OptiPiston-mc<版本线>-windows-x64.zip`。任一版本线构建失败都不会发布。
 
 ## 已知限制
 
-- 26.30 和 26.60 尚未实机运行。它们依据 LeviLamina 头文件移植，可以构建并通过单元测试。
 - 各版本线通过不同的入口完成相同的步骤。在 26.20 以外的版本上，帧计数跟随 `LevelRenderer::renderLevel`，活塞臂的视觉进度只在绘制期间生效；26.10 在游戏分发渲染的位置拦截两个活塞渲染器。这些路径在移动开始或结束时可能有细微差异。
 - 已在本地世界和 Playback 回放中测试；多人服务器尚未验证。
-- 被活塞推动的方块在移动时可能明暗闪烁。原版同样如此，目前尚未修复。
 - 世界变速仅限单人，重启后不保留。
 
 如需报告可复现问题，请附带日志和版本信息[创建 Issue](https://github.com/wo55555/OptiPiston/issues)。
